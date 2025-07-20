@@ -1,0 +1,1 @@
+<INNHOLD FRA README.md HER – på norsk – forklart i tidligere svar>
