@@ -9,7 +9,7 @@ if not token:
     exit(1)
 
 # Repo-URL med token (bruker hovedrepoet!)
-repo_url = f"https://oauth2:{token}@github.com/Tom-debug-design/Atomicbot-heartbeat-test.git"
+repo_url = f"https://x-access-token:{token}@github.com/Tom-debug-design/Atomicbot-heartbeat-test.git"
 local_path = "repo"
 INTERVAL = 3600  # 1 time
 
