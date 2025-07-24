@@ -3,7 +3,7 @@ import random
 import datetime
 import requests
 
-WEBHOOK_URL = "https://discord.com/api/webhooks/..."  # ← Sett inn din Discord URL
+WEBHOOK_URL = https://discord.com/api/webhooks/1391855933071560735/uH6LYuqM6uHLet9KhsgCS89fQikhyuPRJmjhqmtESMhAlu3LxDfUrVggwxzSGyscEtiN # ← Sett inn din Discord URL
 
 def send_discord_message(message):
     try:
