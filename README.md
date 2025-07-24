@@ -1,1 +1,2 @@
-<INNHOLD FRA README.md HER – på norsk – forklart i tidligere svar>
+# AtomicBot Agent Trade Ready
+Simulerer kjøp/salg og sender meldinger til Discord.
