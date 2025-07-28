@@ -1,0 +1,25 @@
+name: Bridge Push Test
+
+on:
+  push:
+    paths:
+      - 'bridge_test.txt'
+
+jobs:
+  test-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Make change to file
+        run: |
+          echo "Updated at $(date)" >> bridge_test.txt
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bridge_test.txt
+          git commit -m "Bridge test update"
+          git push
