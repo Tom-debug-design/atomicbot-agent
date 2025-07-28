@@ -1,24 +1,24 @@
-name: PAT Push Test 
+name: PAT Push Test
 
 on:
-  workflow_dispatch: 
+  workflow_dispatch:
 
 jobs:
-  push-test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3 
+  push-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-      - name: Create test file
-        run: echo "Bridge PAT test $(date)" > pat_bridge_test.txt 
+      - name: Create test file
+        run: echo "Bridge PAT test $(date)" > pat_bridge_test.txt
 
-      - name: Commit and push
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pat_bridge_test.txt
-          git commit -m "PAT push testfile via GitHub Actions"
-          git push https://x-access-token:${GH_PAT}@github.com/${{ github.repository }} HEAD:main
+      - name: Commit and push
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pat_bridge_test.txt
+          git commit -m "PAT push testfil via GitHub Actions"
+          git push https://x-access-token:${GH_PAT}@github.com/Tom-debug-design/atomicbot-agent.git HEAD:main
