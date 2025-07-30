@@ -53,21 +53,15 @@ def daily_report():
     stats = get_daily_stats()
     if not stats["trades"]:
         return
-    report = (
-        f"📈 **Daglig ChunkyAI rapport:**
-"
-        f"Totalt handler: {stats['trades']}
-"
-        f"Daglig gevinst: ${stats['pnl']:.2f} ({stats['pnl_percent']:.2f}%)
-"
-        f"Winrate: {stats['winrate']}%
-"
-        f"Beste strategi: {stats['best_strategy']}
-"
-        f"Mål: ${stats['goal']} | Streak: {stats['streak']}
-"
-    )
-    send_discord_message(report)
+    report = f"""
+📈 **Daglig ChunkyAI rapport:**
+Totalt handler: {stats['trades']}
+Daglig gevinst: ${stats['pnl']:.2f} ({stats['pnl_percent']:.2f}%)
+Winrate: {stats['winrate']}%
+Beste strategi: {stats['best_strategy']}
+Mål: ${stats['goal']} | Streak: {stats['streak']}
+"""
+send_discord_message(report)
 
 def main():
     balance = START_BALANCE
