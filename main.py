@@ -6,6 +6,8 @@ import random
 import requests
 from datetime import datetime
 from learner import select_strategy, log_trade_result, get_daily_stats, update_goal, get_goal, reset_goal, get_streak
+import threading
+from flask import Flask
 
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK") or "YOUR_DISCORD_WEBHOOK_URL"
 TOKEN_LIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ADAUSDT", "BNBUSDT", "XRPUSDT", "AVAXUSDT", "MATICUSDT"]
@@ -84,9 +86,6 @@ def main():
             daily_report()
             last_report_day = now.day
         time.sleep(12)
-        import threading
-from flask import Flask
-
 app = Flask(__name__)
 
 @app.route("/")
@@ -94,7 +93,7 @@ def home():
     return "ChunkyAI v5 running! 🚀"
 
 def bot_thread():
-    main()  # <- Dette starter tradingloopen din
+    main()
 
 if __name__ == "__main__":
     t = threading.Thread(target=bot_thread, daemon=True)
