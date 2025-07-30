@@ -1,9 +1,13 @@
-# AtomicBot Bridge v2
+# ChunkyAI v5
 
-Denne mappen inneholder en GitHub Actions-workflow som automatisk pusher alle filer fra `agent_outbox/` til repoet.
+Aggressiv multi-strategi tradingbot med AI-læring, gevinstmål og Discord-rapport.
 
-## Hvordan bruke
+## Features
+- Rask loop (12s), smart signal
+- Daglig gevinstmål ($50 starter, øker +$25 per streak)
+- PnL, winrate, streak, strategi logg
+- AI learning – alltid beste strategi/token
+- Roadmap & changelog
+- Klar for Railway deploy
 
-1. Legg filer du vil pushe i `agent_outbox/`
-2. GitHub Actions (`bridge_push.yml`) flytter filene til roten og committer
-3. Endringene vises i GitHub med melding "Bridge auto-push from agent_outbox"
+Se ROADMAP.md og CHANGELOG.md.

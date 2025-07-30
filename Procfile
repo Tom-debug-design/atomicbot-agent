@@ -1,1 +1,1 @@
-worker: python agent.py
+web: gunicorn main:app

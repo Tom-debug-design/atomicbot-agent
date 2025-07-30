@@ -1,0 +1,6 @@
+- [x] Rask loop
+- [x] PnL, winrate, streak
+- [x] Discord rapport
+- [x] Auto mål/streak
+- [x] AI learning
+- [ ] Avansert analyse/ML
