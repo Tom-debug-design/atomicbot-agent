@@ -90,6 +90,21 @@ def main():
             daily_report()
             last_report_day = now.day
         time.sleep(12)
+        import threading
+from flask import Flask
+
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "ChunkyAI v5 running! 🚀"
+
+def bot_thread():
+    main()  # <- Dette starter tradingloopen din
 
 if __name__ == "__main__":
-    main()
+    t = threading.Thread(target=bot_thread, daemon=True)
+    t.start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+
