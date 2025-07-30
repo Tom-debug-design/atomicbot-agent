@@ -1,55 +1,45 @@
-import os
-import time
-from git import Repo
 
-# Miljøvariabel for GitHub-token
-token = os.getenv("GITHUB-TOKEN")
-if not token:
-    print("❌ Feil: GITHUB-TOKEN er ikke satt!")
-    exit(1)
+import time, requests, os
+from strategies import get_signal
 
-# Repo-URL med token (bruker hovedrepoet!)
-repo_url = f"https://x-access-token:{token}@github.com/Tom-debug-design/Atomicbot-heartbeat-test.git"
-local_path = "repo"
-INTERVAL = 3600  # 1 time
+DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK')
 
-# Klon repo hvis det ikke finnes lokalt
-try:
-    if not os.path.exists(local_path):
-        print("🔄 Kloner hovedrepo...")
-        repo = Repo.clone_from(repo_url, local_path, branch='main')
-    else:
-        repo = Repo(local_path)
-except Exception as e:
-    print(f"🚫 Klarte ikke klone repo: {e}")
-    exit(1)
+def discord_message(msg):
+    requests.post(DISCORD_WEBHOOK, json={"content": msg})
 
-# Git config
-with repo.config_writer() as cw:
-    cw.set_value("user", "name", "AtomicBot Agent")
-    cw.set_value("user", "email", "[email protected]")
+def heartbeat():
+    discord_message("💚 AtomicBot agent is alive.")
 
-origin = repo.remotes.origin
-print("✅ Agent kjører. Starter heartbeat-loop...")
+def send_trade(action, symbol, price, qty, pnl):
+    emoji = "🔵 BUY" if action == "BUY" else "🔴 SELL"
+    msg = f"{emoji}: {symbol} at ${price:.2f} | Amount: ${qty:.2f} | PnL: {pnl:.2f}%"
+    discord_message(msg)
 
-while True:
-    try:
-        origin.pull()
-    except Exception as e:
-        print(f"⚠️ Pull-feil: {e}")
+def hourly_report(trades):
+    total_trades = len(trades)
+    total_pnl = sum([trade['pnl'] for trade in trades])
+    msg = f"📊 Hourly Report:\nTotal Trades: {total_trades}\nTotal PnL: {total_pnl:.2f}%"
+    discord_message(msg)
 
-    # Oppdater heartbeat.txt
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    heartbeat_path = os.path.join(local_path, "heartbeat.txt")
-    with open(heartbeat_path, "w") as f:
-        f.write(f"AtomicBot er live – {timestamp}\n")
+def main_loop():
+    trades = []
+    last_hour = time.time()
+    while True:
+        heartbeat()
+        
+        symbol, price, action = get_signal()
+        if action != "HOLD":
+            qty = 50
+            pnl = (price * 0.05) if action == "BUY" else -(price * 0.05)
+            trades.append({"symbol": symbol, "pnl": pnl})
+            send_trade(action, symbol, price, qty, pnl)
+        
+        if time.time() - last_hour >= 3600:
+            hourly_report(trades)
+            trades = []
+            last_hour = time.time()
+        
+        time.sleep(60)
 
-    try:
-        repo.index.add([heartbeat_path])
-        repo.index.commit("Oppdaterer heartbeat-tidspunkt")
-        origin.push()
-        print(f"🟢 Pushet heartbeat: {timestamp}")
-    except Exception as e:
-        print(f"❌ Push-feil: {e}")
-
-    time.sleep(INTERVAL)
+if __name__ == "__main__":
+    main_loop()
