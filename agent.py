@@ -1,6 +1,8 @@
 import random, time, os, requests
 
 # --- SETTINGS ---
+print("Starter chunkyAI loop")
+print("DISCORD_WEBHOOK:", DISCORD_WEBHOOK)
 TOKENS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
     "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
