@@ -1,1 +1,1 @@
-python agent.py
+web:python agent.py
