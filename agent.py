@@ -116,14 +116,9 @@ def ai_feedback():
     best = get_best_strategy(trade_log)
     send_discord(f"🤖 AI: Best strategy last 10: {best}")
 
-def heartbeat():
-    now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    send_discord(f"❤️ Heartbeat: AtomicBot is alive at {now} UTC")
-
 send_discord("🟢 AtomicBot agent starter…")
 
 last_report = time.time()
-last_beat = time.time()
 
 while True:
     for symbol in TOKENS:
@@ -133,11 +128,7 @@ while True:
         print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
             handle_trade(symbol, action, price, strategy)
-    # Heartbeat hvert 60 sek
-    if time.time() - last_beat > 60:
-        heartbeat()
-        last_beat = time.time()
-    # Rapport også hvert 60 sek
+    # Rapport, AI og tuning hvert 60 sek
     if time.time() - last_report > 60:
         hourly_report()
         ai_feedback()
