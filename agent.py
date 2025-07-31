@@ -1,34 +1,25 @@
 import random, time, os, requests
 
-# --- SETTINGS ---
-print("Starter chunkyAI loop")
-print("DISCORD_WEBHOOK:", DISCORD_WEBHOOK)
 TOKENS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
     "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
 ]
 COINGECKO_MAP = {
-    "BTCUSDT": "bitcoin",
-    "ETHUSDT": "ethereum",
-    "SOLUSDT": "solana",
-    "BNBUSDT": "binancecoin",
-    "XRPUSDT": "ripple",
-    "ADAUSDT": "cardano",
-    "DOGEUSDT": "dogecoin",
-    "MATICUSDT": "matic-network",
-    "AVAXUSDT": "avalanche-2",
-    "LINKUSDT": "chainlink"
+    "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
+    "BNBUSDT": "binancecoin", "XRPUSDT": "ripple", "ADAUSDT": "cardano",
+    "DOGEUSDT": "dogecoin", "MATICUSDT": "matic-network",
+    "AVAXUSDT": "avalanche-2", "LINKUSDT": "chainlink"
 }
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 
-# --- STATE ---
 balance = START_BALANCE
 holdings = {symbol: 0.0 for symbol in TOKENS}
 trade_log = []
 auto_buy_pct = 0.1   # Starter på 10%, tuner seg selv!
 
 def send_discord(msg):
+    print("DISCORD:", msg)
     try:
         requests.post(DISCORD_WEBHOOK, json={"content": msg})
     except Exception as e:
@@ -42,7 +33,7 @@ def get_price(symbol):
         return float(data[coingecko_id]["usd"])
     except Exception as e:
         print(f"Price fetch error: {e}")
-        return None  # Eller fallback til random pris
+        return None
 
 def choose_strategy():
     return random.choice(["RSI", "EMA", "RANDOM"])
@@ -50,7 +41,7 @@ def choose_strategy():
 def get_signal(strategy, price, holdings):
     if price is None: return "HOLD"
     if strategy == "RSI":
-        if price < 25 and holdings == 0:   # Lavt for å unngå å kjøpe på topp
+        if price < 25 and holdings == 0:
             return "BUY"
         elif price > 60 and holdings > 0:
             return "SELL"
@@ -125,15 +116,28 @@ def ai_feedback():
     best = get_best_strategy(trade_log)
     send_discord(f"🤖 AI: Best strategy last 10: {best}")
 
-# --- MAIN LOOP ---
+def heartbeat():
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    send_discord(f"❤️ Heartbeat: AtomicBot is alive at {now} UTC")
+
+send_discord("🟢 AtomicBot agent starter…")
+
 last_report = time.time()
+last_beat = time.time()
+
 while True:
     for symbol in TOKENS:
         price = get_price(symbol)
         strategy = get_best_strategy(trade_log) if len(trade_log) > 10 else choose_strategy()
         action = get_signal(strategy, price, holdings[symbol])
+        print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
             handle_trade(symbol, action, price, strategy)
+    # Heartbeat hvert 60 sek
+    if time.time() - last_beat > 60:
+        heartbeat()
+        last_beat = time.time()
+    # Rapport også hvert 60 sek
     if time.time() - last_report > 60:
         hourly_report()
         ai_feedback()
