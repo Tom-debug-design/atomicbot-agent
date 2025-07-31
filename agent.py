@@ -1,55 +1,44 @@
-import random, time, os, requests, csv
 
-MODE = "backtest"    # Chunky styrer selv - starter i backtest
+import random, time, os, requests, json
+
+# --- SETTINGS ---
 TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT",
+    "LTCUSDT", "TRXUSDT", "BCHUSDT", "FILUSDT", "OPUSDT", "STXUSDT"
 ]
 COINGECKO_MAP = {
     "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
-    "BNBUSDT": "binancecoin", "XRPUSDT": "ripple"
+    "BNBUSDT": "binancecoin", "XRPUSDT": "ripple", "ADAUSDT": "cardano",
+    "DOGEUSDT": "dogecoin", "MATICUSDT": "matic-network",
+    "AVAXUSDT": "avalanche-2", "LINKUSDT": "chainlink",
+    "LTCUSDT": "litecoin", "TRXUSDT": "tron", "BCHUSDT": "bitcoin-cash",
+    "FILUSDT": "filecoin", "OPUSDT": "optimism", "STXUSDT": "stacks"
 }
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
+
+# --- STATE ---
 balance = START_BALANCE
 holdings = {symbol: 0.0 for symbol in TOKENS}
 trade_log = []
-auto_buy_pct = 0.1
-MAX_HOLD_MINUTES = 20
-last_trade_time = {symbol: None for symbol in TOKENS}
+ai_learning_log = []
+auto_buy_pct = 0.10   # Start på 10%, auto-tunes
 
 def send_discord(msg):
-    print("DISCORD:", msg)
     try:
-        if DISCORD_WEBHOOK and MODE == "live":
-            requests.post(DISCORD_WEBHOOK, json={"content": msg})
+        requests.post(DISCORD_WEBHOOK, json={"content": msg})
     except Exception as e:
         print(f"Discord error: {e}")
 
-def make_dummy_backtest(tokens=None, n=2000):
-    if tokens is None:
-        tokens = ["BTCUSDT", "ETHUSDT"]
-    with open("backtest_data.csv", "w", newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(["timestamp", "symbol", "price"])
-        ts = int(time.time()) - n*60
-        for i in range(n):
-            for sym in tokens:
-                price = round(20000 + random.gauss(0,1)*3000 + random.gauss(0,1)*500*i/n, 2)
-                writer.writerow([ts, sym, price])
-            ts += 60
-    print(f"Laget backtest_data.csv med {n*len(tokens)} rader for backtest!")
-
-def get_price(symbol, backtest_row=None):
-    if MODE == "backtest":
-        return backtest_row["price"] if backtest_row is not None else None
+def get_price(symbol):
     coingecko_id = COINGECKO_MAP.get(symbol, "bitcoin")
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
     try:
-        data = requests.get(url, timeout=5).json()
-        price = float(data[coingecko_id]["usd"])
-        return price
-    except Exception:
-        send_discord(f"⚠️ Price fetch error for {symbol}")
+        data = requests.get(url, timeout=3).json()
+        return float(data[coingecko_id]["usd"])
+    except Exception as e:
+        print(f"Price fetch error: {e}")
         return None
 
 def choose_strategy():
@@ -57,25 +46,26 @@ def choose_strategy():
 
 def get_signal(strategy, price, holdings):
     if price is None: return "HOLD"
+    # Gjør signalene enklere for test/demo (mer aggressive triggers)
     if strategy == "RSI":
-        if price < 25 and holdings == 0:
+        if price % 17 < 5 and holdings == 0:  # Mer aggressive triggere
             return "BUY"
-        elif price > 60 and holdings > 0:
+        elif price % 13 > 10 and holdings > 0:
             return "SELL"
         else:
             return "HOLD"
     elif strategy == "EMA":
-        if int(price) % 2 == 0 and holdings == 0:
+        if int(price*100) % 3 == 0 and holdings == 0:
             return "BUY"
-        elif int(price) % 5 == 0 and holdings > 0:
+        elif int(price*100) % 7 == 0 and holdings > 0:
             return "SELL"
         else:
             return "HOLD"
     else:
         return random.choice(["BUY", "SELL", "HOLD"])
 
-def handle_trade(symbol, action, price, strategy, ts):
-    global balance, holdings, trade_log, auto_buy_pct, last_trade_time
+def handle_trade(symbol, action, price, strategy):
+    global balance, holdings, trade_log, auto_buy_pct
     if price is None: return
     amount_usd = balance * auto_buy_pct if action == "BUY" else holdings[symbol] * price
     qty = round(amount_usd / price, 6) if action == "BUY" else holdings[symbol]
@@ -84,98 +74,79 @@ def handle_trade(symbol, action, price, strategy, ts):
     if action == "BUY" and balance >= amount_usd and qty > 0:
         balance -= amount_usd
         holdings[symbol] += qty
-        last_trade_time[symbol] = ts
-        send_discord(f"🔵 BUY {symbol}: {qty} at ${price:.2f}, new balance ${balance:.2f}")
-        trade_log.append({
-            "timestamp": ts, "symbol": symbol, "action": "BUY", "price": price,
-            "qty": qty, "strategy": strategy, "pnl": 0.0, "balance": balance
-        })
+        msg = f"🔵 BUY {symbol}: {qty} @ ${price:.2f}, bal: ${balance:.2f}"
+        send_discord(msg)
+        trade_log.append({"symbol": symbol, "action": "BUY", "price": price,
+                          "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": 0.0})
+        ai_learning_log.append({"symbol": symbol, "strategy": strategy, "signal": "BUY", "price": price, "ts": time.time()})
     elif action == "SELL" and holdings[symbol] > 0:
         proceeds = qty * price
         last_buy = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
         pnl = ((price - last_buy["price"]) / last_buy["price"] * 100) if last_buy else 0.0
         balance += proceeds
         holdings[symbol] = 0.0
-        last_trade_time[symbol] = ts
-        send_discord(f"🔴 SELL {symbol}: {qty} at ${price:.2f}, PnL: {pnl:.2f}%, balance: ${balance:.2f}")
-        trade_log.append({
-            "timestamp": ts, "symbol": symbol, "action": "SELL", "price": price,
-            "qty": qty, "strategy": strategy, "pnl": pnl, "balance": balance
-        })
+        msg = f"🔴 SELL {symbol}: {qty} @ ${price:.2f}, PnL: {pnl:.2f}%, bal: ${balance:.2f}"
+        send_discord(msg)
+        trade_log.append({"symbol": symbol, "action": "SELL", "price": price,
+                          "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": pnl})
+        ai_learning_log.append({"symbol": symbol, "strategy": strategy, "signal": "SELL", "price": price, "ts": time.time(), "pnl": pnl})
 
-def force_sell(symbol, price, ts):
-    global holdings, balance, trade_log, last_trade_time
-    if holdings[symbol] > 0 and price:
-        qty = holdings[symbol]
-        proceeds = qty * price
-        last_buy = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
-        pnl = ((price - last_buy["price"]) / last_buy["price"] * 100) if last_buy else 0.0
-        balance += proceeds
-        holdings[symbol] = 0.0
-        last_trade_time[symbol] = ts
-        send_discord(f"⏱️ FORCE SELL {symbol}: {qty} at ${price:.2f}, PnL: {pnl:.2f}%, balance: ${balance:.2f}")
-        trade_log.append({
-            "timestamp": ts, "symbol": symbol, "action": "FORCE_SELL", "price": price,
-            "qty": qty, "strategy": "FORCE", "pnl": pnl, "balance": balance
-        })
+def get_best_strategy(trade_log):
+    recent = [t for t in trade_log[-30:] if t["action"] == "SELL"]
+    strat_stats = {}
+    for t in recent:
+        s = t.get("strategy", "RANDOM")
+        strat_stats.setdefault(s, []).append(t.get("pnl", 0))
+    if not strat_stats: return choose_strategy()
+    best = max(strat_stats, key=lambda x: sum(strat_stats[x])/len(strat_stats[x]) if strat_stats[x] else -999)
+    return best
 
-def save_log():
-    with open("chunky_trades_log.csv", "w", newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=["timestamp","symbol","action","price","qty","strategy","pnl","balance"])
-        writer.writeheader()
-        writer.writerows(trade_log)
+def auto_tune(trade_log):
+    global auto_buy_pct
+    recent = [t for t in trade_log[-10:] if t["action"] == "SELL"]
+    pnl_sum = sum(t.get("pnl", 0) for t in recent)
+    if recent and pnl_sum > 0 and auto_buy_pct < 0.3:
+        auto_buy_pct += 0.02
+        send_discord(f"🔧 AI auto-tuning: Øker buy% til {auto_buy_pct*100:.1f}")
+    elif recent and pnl_sum < 0 and auto_buy_pct > 0.05:
+        auto_buy_pct -= 0.01
+        send_discord(f"🔧 AI auto-tuning: Senker buy% til {auto_buy_pct*100:.1f}")
 
-# ----------- MAIN CHUNKY BOT LOOP -----------
+def hourly_report():
+    total_trades = len(trade_log)
+    realized_pnl = sum(t.get("pnl", 0) for t in trade_log if t["action"] == "SELL")
+    msg = f"📊 Hourly Report: Trades: {total_trades}, Realized PnL: {realized_pnl:.2f}%, Balance: ${balance:.2f}"
+    send_discord(msg)
 
-if MODE == "backtest":
+def ai_feedback():
+    best = get_best_strategy(trade_log)
+    send_discord(f"🤖 AI: Best strategy last 30: {best}")
+
+def save_ai_log():
+    # Du kan hente ut dette via GitHub bridge senere
     try:
-        with open("backtest_data.csv") as f: pass
-    except Exception:
-        make_dummy_backtest(tokens=TOKENS, n=1000)
-    import pandas as pd
-    df = pd.read_csv("backtest_data.csv")
-    df = df[df.symbol.isin(TOKENS)].sort_values("timestamp")
-    data_stream = df.to_dict("records")
-else:
-    data_stream = [None] * 999999
+        with open("ai_learning_log.json", "w") as f:
+            json.dump(ai_learning_log, f, indent=2)
+    except Exception as e:
+        print(f"Save AI log error: {e}")
 
-print(f"🟢 ChunkyBot starter i {MODE.upper()} MODUS!")
+# --- MAIN LOOP ---
+send_discord("🟢 AtomicBot Aggressive v3 starter…")
+last_report = time.time()
 
-step = 0
 while True:
-    if MODE == "backtest":
-        if step >= len(data_stream):
-            print("Backtest ferdig! Switche chunky til LIVE trading! 🚀")
-            save_log()
-            MODE = "live"
-            step = 0
-            continue
-        row = data_stream[step]
-        ts, symbol, price = row["timestamp"], row["symbol"], row["price"]
-        strategy = choose_strategy()
+    for symbol in TOKENS:
+        price = get_price(symbol)
+        # Nå: bruker beste strategi basert på siste 30 handler
+        strategy = get_best_strategy(trade_log) if len(trade_log) > 30 else choose_strategy()
         action = get_signal(strategy, price, holdings[symbol])
-        if holdings[symbol] > 0 and last_trade_time[symbol]:
-            age_min = (ts - last_trade_time[symbol]) / 60
-            if age_min > MAX_HOLD_MINUTES:
-                force_sell(symbol, price, ts)
-                step += 1
-                continue
+        print(f"{symbol} | Pris: {price} | Strat: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
-            handle_trade(symbol, action, price, strategy, ts)
-        step += 1
-        if step % 1000 == 0:
-            print(f"Backtest steg: {step}/{len(data_stream)}")
-    else:
-        for symbol in TOKENS:
-            price = get_price(symbol)
-            ts = time.time()
-            strategy = choose_strategy()
-            action = get_signal(strategy, price, holdings[symbol])
-            if holdings[symbol] > 0 and last_trade_time[symbol]:
-                age_min = (ts - last_trade_time[symbol]) / 60
-                if age_min > MAX_HOLD_MINUTES:
-                    force_sell(symbol, price, ts)
-                    continue
-            if action in ("BUY", "SELL"):
-                handle_trade(symbol, action, price, strategy, ts)
-        time.sleep(30)
+            handle_trade(symbol, action, price, strategy)
+        time.sleep(0.2)  # Slik at API ikke blir spammet
+    if time.time() - last_report > 60:
+        hourly_report()
+        ai_feedback()
+        auto_tune(trade_log)
+        save_ai_log()
+        last_report = time.time()
