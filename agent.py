@@ -1,39 +1,3 @@
-import random, time, os, requests, csv
-
-TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
-    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
-]
-COINGECKO_MAP = {
-    "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
-    "BNBUSDT": "binancecoin", "XRPUSDT": "ripple", "ADAUSDT": "cardano",
-    "DOGEUSDT": "dogecoin", "MATICUSDT": "matic-network",
-    "AVAXUSDT": "avalanche-2", "LINKUSDT": "chainlink"
-}
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
-START_BALANCE = 1000.0
-
-balance = START_BALANCE
-holdings = {symbol: 0.0 for symbol in TOKENS}
-trade_log = []
-auto_buy_pct = 0.1   # Starter på 10%, tuner seg selv!
-
-def send_discord(msg):
-    print("DISCORD:", msg)
-    try:
-        if DISCORD_WEBHOOK:
-            requests.post(DISCORD_WEBHOOK, json={"content": msg})
-    except Exception as e:
-        print(f"Discord error: {e}")
-
-def get_price(symbol):
-    coingecko_id = COINGECKO_MAP.get(symbol, "bitcoin")
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
-    try:
-        data = requests.get(url, timeout=5).json()
-        return float(data[coingecko_id]["usd"])
-    except Exception as e:
-        print(f"Price fetch error: {e}")
         return None
 
 def choose_strategy():
