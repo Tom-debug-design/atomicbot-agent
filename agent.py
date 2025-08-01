@@ -1,5 +1,6 @@
 import os, time, random, requests
 from binance.client import Client
+from collections import deque
 
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
@@ -18,6 +19,10 @@ holdings = {symbol: 0.0 for symbol in TOKENS}
 trade_log = []
 auto_buy_pct = 0.1
 
+# Pattern Memory & Price history
+pattern_memory = deque(maxlen=20)
+price_history = {symbol: deque(maxlen=60) for symbol in TOKENS}
+
 def send_discord(msg):
     print("DISCORD:", msg)
     try:
@@ -28,13 +33,55 @@ def send_discord(msg):
 def get_price(symbol):
     try:
         ticker = client.get_symbol_ticker(symbol=symbol)
-        return float(ticker['price'])
+        price = float(ticker['price'])
+        price_history[symbol].append(price)
+        return price
     except Exception as e:
         print(f"Binance error: {e}")
         return None
 
-def choose_strategy():
-    return random.choice(["RSI", "EMA", "RANDOM"])
+def record_pattern(trades):
+    if len(trades) < 3: return
+    seq = '-'.join([t['action'] for t in trades[-3:]])
+    outcome = sum(t['pnl'] for t in trades[-3:])
+    pattern_memory.append({'seq': seq, 'pnl': outcome})
+
+def detect_pattern_risk():
+    if len(trade_log) < 3: return False
+    seq_now = '-'.join([t['action'] for t in trade_log[-3:]])
+    risky = sum(p['pnl'] < 0 for p in pattern_memory if p['seq'] == seq_now)
+    if risky >= 2:
+        send_discord(f"🚨 Pattern warning: Sekvens {seq_now} har gitt tap flere ganger!")
+    return risky >= 2
+
+def get_regime(prices):
+    if len(prices) < 50:
+        return "UNKNOWN"
+    ma10 = sum(prices[-10:]) / 10
+    ma50 = sum(prices[-50:]) / 50
+    atr = sum(abs(prices[i] - prices[i-1]) for i in range(-10, -1)) / 9
+    if ma10 > ma50 and atr < (0.01 * ma10):
+        return "BULL"
+    elif ma10 < ma50 and atr < (0.01 * ma10):
+        return "BEAR"
+    elif atr > (0.02 * ma10):
+        return "VOLATILE"
+    else:
+        return "RANGE"
+
+def choose_strategy(symbol):
+    regime = get_regime(list(price_history[symbol]))
+    if regime == "BULL":
+        send_discord(f"📈 {symbol} regime: BULL – bruker EMA")
+        return "EMA"
+    elif regime == "BEAR":
+        send_discord(f"📉 {symbol} regime: BEAR – bruker RSI")
+        return "RSI"
+    elif regime == "VOLATILE":
+        send_discord(f"⚡ {symbol} regime: VOLATILE – bruker RANDOM")
+        return "RANDOM"
+    else:
+        return random.choice(["RSI", "EMA", "RANDOM"])
 
 def get_signal(strategy, price, holdings):
     if price is None: return "HOLD"
@@ -82,7 +129,7 @@ def get_best_strategy(trade_log):
         s = t.get("strategy", "RANDOM")
         strat_stats.setdefault(s, []).append(t.get("pnl", 0))
     if not strat_stats:
-        return choose_strategy()
+        return choose_strategy(random.choice(TOKENS))
     best = max(strat_stats, key=lambda x: sum(strat_stats[x])/len(strat_stats[x]) if strat_stats[x] else -999)
     return best
 
@@ -114,7 +161,7 @@ def balance_emoji(bal):
     if bal > START_BALANCE * 0.8: return "🔴"
     return "💀"
 
-send_discord("🟢 AtomicBot agent starter… (live demo mode, Binance prices!)")
+send_discord("🟢 AtomicBot starter... (Pattern Memory + Regime Detection ENABLED)")
 
 last_report = time.time()
 last_magic = time.time()
@@ -122,12 +169,15 @@ last_magic = time.time()
 while True:
     for symbol in TOKENS:
         price = get_price(symbol)
-        strategy = get_best_strategy(trade_log) if len(trade_log) > 30 else choose_strategy()
+        if not price: continue
+        strategy = choose_strategy(symbol)
         action = get_signal(strategy, price, holdings[symbol])
         print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
             handle_trade(symbol, action, price, strategy)
-    # Magi 3 og 5: Beste strategi, verste tap og emoji-balanse
+            record_pattern(trade_log)
+            if detect_pattern_risk():
+                send_discord(f"⚠️ ChunkyAI: Oppdaget risikomønster etter trade – vurder HOLD/bytte strategi!")
     if time.time() - last_magic > 600:
         last_hour = [t for t in trade_log if t["action"] == "SELL" and t["timestamp"] > time.time() - 3600]
         if last_hour:
@@ -137,7 +187,6 @@ while True:
             send_discord(f"💀 Største tap siste time: {worst['strategy']} {worst['symbol']} ({worst['pnl']:.2f}%)")
         send_discord(f"{balance_emoji(balance)} Balanse nå: ${balance:.2f}")
         last_magic = time.time()
-    # Vanlige rapporter og AI-feedback
     if time.time() - last_report > 60:
         hourly_report()
         ai_feedback()
