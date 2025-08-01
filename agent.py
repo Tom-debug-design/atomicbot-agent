@@ -1,4 +1,4 @@
-import requests, os, time, random, statistics, json, math
+import requests, os, time, random, statistics, math
 from datetime import datetime
 
 # === CONFIG ===
@@ -9,21 +9,17 @@ TOKENS = [
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 MAX_POSITIONS = 3
-USE_TRAILING_STOP = True
-STOP_LOSS_PCT = 0.06      # 6% max tap per trade
-TAKE_PROFIT_PCT = 0.10    # 10% target på gevinst
-TRAIL_START_PCT = 0.03    # Start trailing stop når gevinst >3%
-TRAIL_STEP_PCT = 0.02     # Trailing step etter det
-POSITION_SIZE_PCT = 0.10  # 10% per trade
-REPORT_FREQ = 3600
-DAILY_REPORT_UTC = 6
+STOP_LOSS_PCT = 0.06      # 6% tap per trade
+TAKE_PROFIT_PCT = 0.10    # 10% gevinst
+POSITION_SIZE_PCT = 0.10  # 10% av balansen per trade
+REPORT_FREQ = 3600        # 1 time mellom hver rapport
+DAILY_REPORT_UTC = 6      # 06:00 UTC
 DEMO_MODE = True
 
 # === STATE ===
 balance = START_BALANCE
 holdings = {symbol: 0.0 for symbol in TOKENS}
 entry_price = {symbol: 0.0 for symbol in TOKENS}
-trailing_high = {symbol: 0.0 for symbol in TOKENS}
 trade_log = []
 price_history = {symbol: [] for symbol in TOKENS}
 logfile = "atomicbot_trades.csv"
@@ -80,7 +76,6 @@ def calc_volatility(prices, window=14):
     return statistics.stdev(returns[-window:]) * 100 if len(returns) >= window else 0
 
 def choose_signal(symbol, prices):
-    # === SmartSignals: flere indikatorer må stemme ===
     rsi = calc_rsi(prices)
     ema = calc_ema(prices, 14)
     price_now = prices[-1]
@@ -94,30 +89,8 @@ def choose_signal(symbol, prices):
     else:
         return "HOLD", {"rsi": rsi, "ema": ema, "vol": vol}
 
-def get_trades_last_n(n):
-    return trade_log[-n:] if len(trade_log) > n else trade_log
-
-def adaptive_param_tune():
-    # === AdaptiveLogic: Endre RSI-grenser etter resultater ===
-    last_trades = get_trades_last_n(30)
-    if not last_trades: return
-    wins = [t for t in last_trades if t['pnl'] > 0]
-    losses = [t for t in last_trades if t['pnl'] < 0]
-    win_rate = len(wins) / len(last_trades) if last_trades else 0.5
-    global STOP_LOSS_PCT, TAKE_PROFIT_PCT
-    # Øk take-profit hvis winrate > 0.6, senk hvis lav
-    if win_rate > 0.6:
-        TAKE_PROFIT_PCT = min(TAKE_PROFIT_PCT + 0.01, 0.15)
-    elif win_rate < 0.4:
-        TAKE_PROFIT_PCT = max(TAKE_PROFIT_PCT - 0.01, 0.05)
-    # Skru til stop-loss hvis mange tap
-    if len(losses) > len(wins):
-        STOP_LOSS_PCT = min(STOP_LOSS_PCT + 0.01, 0.15)
-    else:
-        STOP_LOSS_PCT = max(STOP_LOSS_PCT - 0.01, 0.03)
-
 def handle_trade(symbol, action, price, meta):
-    global balance, holdings, entry_price, trailing_high, trade_log
+    global balance, holdings, entry_price, trade_log
     now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     qty = round((balance * POSITION_SIZE_PCT) / price, 6)
     pnl = 0.0
@@ -126,8 +99,7 @@ def handle_trade(symbol, action, price, meta):
             balance -= qty * price
             holdings[symbol] = qty
             entry_price[symbol] = price
-            trailing_high[symbol] = price
-            send_discord(f"🔵 BUY {symbol}: {qty} @ ${price:.2f}, RSI={meta['rsi']} EMA={int(meta['ema'])}")
+            send_discord(f"🔵 BUY {symbol}: {qty} @ ${price:.2f}, RSI={meta['rsi']} EMA={int(meta['ema'])} Bal=${balance:.2f}")
             row = {
                 "dt": now, "symbol": symbol, "action": "BUY", "price": price, "qty": qty,
                 "rsi": meta["rsi"], "ema": meta["ema"], "vol": meta["vol"], "balance": balance, "pnl": ""
@@ -138,7 +110,7 @@ def handle_trade(symbol, action, price, meta):
             pnl = ((price - entry_price[symbol]) / entry_price[symbol]) * 100
             proceeds = holdings[symbol] * price
             balance += proceeds
-            send_discord(f"🔴 SELL {symbol}: {holdings[symbol]} @ ${price:.2f}, PnL: {pnl:.2f}%, RSI={meta['rsi']} EMA={int(meta['ema'])}")
+            send_discord(f"🔴 SELL {symbol}: {holdings[symbol]} @ ${price:.2f}, PnL: {pnl:.2f}%, RSI={meta['rsi']} EMA={int(meta['ema'])} Bal=${balance:.2f}")
             row = {
                 "dt": now, "symbol": symbol, "action": "SELL", "price": price, "qty": holdings[symbol],
                 "rsi": meta["rsi"], "ema": meta["ema"], "vol": meta["vol"], "balance": balance, "pnl": pnl
@@ -150,25 +122,17 @@ def handle_trade(symbol, action, price, meta):
             })
             holdings[symbol] = 0.0
             entry_price[symbol] = 0.0
-            trailing_high[symbol] = 0.0
 
 def check_risk_exit(symbol, price):
-    # === RiskShield: Stop-loss, take-profit, trailing stop ===
     if holdings[symbol] == 0 or entry_price[symbol] == 0: return "HOLD"
     gain = (price - entry_price[symbol]) / entry_price[symbol]
     if gain <= -STOP_LOSS_PCT:
         return "SELL"
     if gain >= TAKE_PROFIT_PCT:
         return "SELL"
-    if USE_TRAILING_STOP and gain > TRAIL_START_PCT:
-        if price > trailing_high[symbol]:
-            trailing_high[symbol] = price
-        elif price < trailing_high[symbol] * (1 - TRAIL_STEP_PCT):
-            return "SELL"
     return "HOLD"
 
 def daily_report():
-    # === InsightLogs: Daglig Discord-rapport med PnL og statistikk ===
     realized = sum(t['pnl'] for t in trade_log if t["action"] == "SELL")
     wins = [t for t in trade_log if t['pnl'] > 0]
     losses = [t for t in trade_log if t['pnl'] < 0]
@@ -177,7 +141,7 @@ def daily_report():
            f"Winrate: {winrate:.1f}%, Bal: ${balance:.2f}")
     send_discord(msg)
 
-send_discord("🟢 AtomicBot v10 – EDGE Edition starter…")
+send_discord("🟢 AtomicBot v11 – CHUNKY Robust starter…")
 last_report = time.time()
 last_daily = time.gmtime().tm_mday
 
@@ -187,18 +151,14 @@ while True:
             price, prices = get_price(symbol)
             if not price or len(prices) < 20:
                 continue
-            # === DataExpand: Flere tidsrammer/indikatorer ===
             action, meta = choose_signal(symbol, prices)
             risk_exit = check_risk_exit(symbol, price)
             if holdings[symbol] > 0 and risk_exit == "SELL":
                 action = "SELL"
             handle_trade(symbol, action, price, meta)
-        adaptive_param_tune()
-        # === InsightLogs: Rapport/Logging ===
         if time.time() - last_report > REPORT_FREQ:
             daily_report()
             last_report = time.time()
-        # Dagsrapport 06:00 UTC
         if time.gmtime().tm_hour == DAILY_REPORT_UTC and time.gmtime().tm_mday != last_daily:
             daily_report()
             last_daily = time.gmtime().tm_mday
