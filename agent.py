@@ -1,26 +1,32 @@
-import requests, os, time, random, statistics
+import requests, os, time, random, statistics, json, math
+from datetime import datetime
 
-# === CONFIG (endres enkelt på toppen) ===
+# === CONFIG ===
 TOKENS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
-    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT", "TRXUSDT"
+    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
 ]
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
-USE_SCALPING = True           # True=kjapp scalp, False=vanlig AI
-RISKCONTROL = False           # True=auto-pause ved stort tap
-REPORT_FREQ = 3600            # Sekunder mellom Discord rapport (3600 = 1 time)
-DAILY_REPORT_UTC = 6          # UTC-tid for dagsrapport
-DEMO_MODE = True              # False = aktiver ekte handler (bygger inn støtte, krever Binance API)
+MAX_POSITIONS = 3
+USE_TRAILING_STOP = True
+STOP_LOSS_PCT = 0.06      # 6% max tap per trade
+TAKE_PROFIT_PCT = 0.10    # 10% target på gevinst
+TRAIL_START_PCT = 0.03    # Start trailing stop når gevinst >3%
+TRAIL_STEP_PCT = 0.02     # Trailing step etter det
+POSITION_SIZE_PCT = 0.10  # 10% per trade
+REPORT_FREQ = 3600
+DAILY_REPORT_UTC = 6
+DEMO_MODE = True
 
 # === STATE ===
 balance = START_BALANCE
 holdings = {symbol: 0.0 for symbol in TOKENS}
+entry_price = {symbol: 0.0 for symbol in TOKENS}
+trailing_high = {symbol: 0.0 for symbol in TOKENS}
 trade_log = []
-auto_buy_pct = 0.1
-
 price_history = {symbol: [] for symbol in TOKENS}
-vol_history = {symbol: [] for symbol in TOKENS}
+logfile = "atomicbot_trades.csv"
 
 def send_discord(msg):
     print("DISCORD:", msg)
@@ -29,177 +35,174 @@ def send_discord(msg):
     except Exception as e:
         print(f"Discord error: {e}")
 
-def get_price(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+def log_trade(row):
+    try:
+        with open(logfile, "a") as f:
+            f.write(",".join(str(row[k]) for k in row) + "\n")
+    except Exception as e:
+        print(f"Logging error: {e}")
+
+def get_price(symbol, lookback=50):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit={lookback}"
     try:
         data = requests.get(url, timeout=5).json()
-        price = float(data["lastPrice"])
-        vol = float(data["volume"])
-        # Sikkerhetsvask for null/negative
-        if price <= 0: return None, None
-        price_history[symbol].append(price)
-        vol_history[symbol].append(vol)
-        if len(price_history[symbol]) > 100: price_history[symbol] = price_history[symbol][-100:]
-        if len(vol_history[symbol]) > 100: vol_history[symbol] = vol_history[symbol][-100:]
-        return price, vol
+        prices = [float(candle[4]) for candle in data]  # close price
+        price_history[symbol] = prices[-100:]
+        return prices[-1], prices
     except Exception as e:
         print(f"Price fetch error for {symbol}: {e}")
-        return None, None
+        return None, []
 
-def rolling_volatility(symbol, window=10):
-    phist = price_history[symbol]
-    if len(phist) < window: return 0
-    returns = [abs(phist[i]-phist[i-1])/phist[i-1] for i in range(-window+1, 0) if phist[i-1] != 0]
-    return sum(returns)/len(returns) * 100 if returns else 0
+def calc_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50
+    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains = [d for d in deltas if d > 0]
+    losses = [-d for d in deltas if d < 0]
+    avg_gain = sum(gains[-period:]) / period if len(gains) >= period else 1
+    avg_loss = sum(losses[-period:]) / period if len(losses) >= period else 1
+    rs = avg_gain / avg_loss if avg_loss != 0 else 100
+    rsi = 100 - (100 / (1 + rs))
+    return round(rsi, 2)
 
-def rolling_trend(symbol, window=20):
-    phist = price_history[symbol]
-    if len(phist) < window: return 0
-    return (phist[-1] - phist[-window])/phist[-window] * 100 if phist[-window] != 0 else 0
+def calc_ema(prices, period=14):
+    if len(prices) < period:
+        return sum(prices)/len(prices)
+    ema = prices[0]
+    k = 2 / (period + 1)
+    for price in prices:
+        ema = price * k + ema * (1 - k)
+    return ema
 
-def choose_strategy(symbol):
-    trend = rolling_trend(symbol)
-    vol = rolling_volatility(symbol)
-    last_vol = vol_history[symbol][-1] if vol_history[symbol] else 0
-    if USE_SCALPING and vol > 3:
-        return "SCALP"
-    if trend > 0.5 and vol < 2:
-        return "EMA"
-    elif trend < -0.5 and vol < 2:
-        return "RSI"
-    elif vol > 3:
-        return "SCALP"
-    elif last_vol > 5000:
-        return "RANDOM"
+def calc_volatility(prices, window=14):
+    if len(prices) < window: return 0
+    returns = [math.log(prices[i]/prices[i-1]) for i in range(1, len(prices))]
+    return statistics.stdev(returns[-window:]) * 100 if len(returns) >= window else 0
+
+def choose_signal(symbol, prices):
+    # === SmartSignals: flere indikatorer må stemme ===
+    rsi = calc_rsi(prices)
+    ema = calc_ema(prices, 14)
+    price_now = prices[-1]
+    vol = calc_volatility(prices)
+    bullish = price_now > ema and rsi < 35 and vol < 2
+    bearish = price_now < ema and rsi > 65 and vol < 2
+    if bullish:
+        return "BUY", {"rsi": rsi, "ema": ema, "vol": vol}
+    elif bearish:
+        return "SELL", {"rsi": rsi, "ema": ema, "vol": vol}
     else:
-        return random.choice(["RSI", "EMA", "RANDOM"])
+        return "HOLD", {"rsi": rsi, "ema": ema, "vol": vol}
 
-def get_signal(symbol, strategy, price, holdings):
-    if price is None or price == 0: return "HOLD"
-    if strategy == "SCALP":
-        last = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
-        if holdings == 0 and price > 0:
-            return "BUY"
-        elif holdings > 0 and last:
-            entry = last["price"]
-            gain = (price - entry) / entry if entry else 0
-            if gain >= 0.01 or gain <= -0.008:
-                return "SELL"
-            else:
-                return "HOLD"
-    elif strategy == "RSI":
-        if price < 25 and holdings == 0:
-            return "BUY"
-        elif price > 60 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
-    elif strategy == "EMA":
-        if int(price) % 2 == 0 and holdings == 0:
-            return "BUY"
-        elif int(price) % 5 == 0 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
+def get_trades_last_n(n):
+    return trade_log[-n:] if len(trade_log) > n else trade_log
+
+def adaptive_param_tune():
+    # === AdaptiveLogic: Endre RSI-grenser etter resultater ===
+    last_trades = get_trades_last_n(30)
+    if not last_trades: return
+    wins = [t for t in last_trades if t['pnl'] > 0]
+    losses = [t for t in last_trades if t['pnl'] < 0]
+    win_rate = len(wins) / len(last_trades) if last_trades else 0.5
+    global STOP_LOSS_PCT, TAKE_PROFIT_PCT
+    # Øk take-profit hvis winrate > 0.6, senk hvis lav
+    if win_rate > 0.6:
+        TAKE_PROFIT_PCT = min(TAKE_PROFIT_PCT + 0.01, 0.15)
+    elif win_rate < 0.4:
+        TAKE_PROFIT_PCT = max(TAKE_PROFIT_PCT - 0.01, 0.05)
+    # Skru til stop-loss hvis mange tap
+    if len(losses) > len(wins):
+        STOP_LOSS_PCT = min(STOP_LOSS_PCT + 0.01, 0.15)
     else:
-        return random.choice(["BUY", "SELL", "HOLD"])
+        STOP_LOSS_PCT = max(STOP_LOSS_PCT - 0.01, 0.03)
 
-def handle_trade(symbol, action, price, strategy):
-    global balance, holdings, trade_log, auto_buy_pct
-    if price is None or price == 0: return
-    amount_usd = balance * auto_buy_pct if action == "BUY" else holdings[symbol] * price
-    qty = round(amount_usd / price, 6) if action == "BUY" else holdings[symbol]
+def handle_trade(symbol, action, price, meta):
+    global balance, holdings, entry_price, trailing_high, trade_log
+    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    qty = round((balance * POSITION_SIZE_PCT) / price, 6)
     pnl = 0.0
-
-    if DEMO_MODE:
-        if action == "BUY" and balance >= amount_usd and qty > 0:
-            balance -= amount_usd
-            holdings[symbol] += qty
-            send_discord(f"🔵 BUY {symbol}: {qty} at ${price:.2f}, new balance ${balance:.2f}")
-            trade_log.append({
-                "symbol": symbol, "action": "BUY", "price": price,
-                "qty": qty, "timestamp": time.time(), "strategy": strategy,
-                "volatility": rolling_volatility(symbol), "trend": rolling_trend(symbol), "pnl": 0.0
-            })
-        elif action == "SELL" and holdings[symbol] > 0:
-            proceeds = qty * price
-            last_buy = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
-            pnl = ((price - last_buy["price"]) / last_buy["price"] * 100) if last_buy else 0.0
+    if action == "BUY" and holdings[symbol] == 0 and len([h for h in holdings.values() if h > 0]) < MAX_POSITIONS:
+        if DEMO_MODE:
+            balance -= qty * price
+            holdings[symbol] = qty
+            entry_price[symbol] = price
+            trailing_high[symbol] = price
+            send_discord(f"🔵 BUY {symbol}: {qty} @ ${price:.2f}, RSI={meta['rsi']} EMA={int(meta['ema'])}")
+            row = {
+                "dt": now, "symbol": symbol, "action": "BUY", "price": price, "qty": qty,
+                "rsi": meta["rsi"], "ema": meta["ema"], "vol": meta["vol"], "balance": balance, "pnl": ""
+            }
+            log_trade(row)
+    elif action == "SELL" and holdings[symbol] > 0:
+        if DEMO_MODE:
+            pnl = ((price - entry_price[symbol]) / entry_price[symbol]) * 100
+            proceeds = holdings[symbol] * price
             balance += proceeds
-            holdings[symbol] = 0.0
-            send_discord(f"🔴 SELL {symbol}: {qty} at ${price:.2f}, PnL: {pnl:.2f}%, balance: ${balance:.2f}")
+            send_discord(f"🔴 SELL {symbol}: {holdings[symbol]} @ ${price:.2f}, PnL: {pnl:.2f}%, RSI={meta['rsi']} EMA={int(meta['ema'])}")
+            row = {
+                "dt": now, "symbol": symbol, "action": "SELL", "price": price, "qty": holdings[symbol],
+                "rsi": meta["rsi"], "ema": meta["ema"], "vol": meta["vol"], "balance": balance, "pnl": pnl
+            }
+            log_trade(row)
             trade_log.append({
                 "symbol": symbol, "action": "SELL", "price": price,
-                "qty": qty, "timestamp": time.time(), "strategy": strategy,
-                "volatility": rolling_volatility(symbol), "trend": rolling_trend(symbol), "pnl": pnl
+                "qty": holdings[symbol], "timestamp": time.time(), "strategy": "SmartSignals", "pnl": pnl
             })
+            holdings[symbol] = 0.0
+            entry_price[symbol] = 0.0
+            trailing_high[symbol] = 0.0
 
-def best_strategy_backtest(trade_log):
-    recent = [t for t in trade_log[-50:] if t["action"] == "SELL"]
-    strat_stats = {}
-    for t in recent:
-        s = t.get("strategy", "RANDOM")
-        strat_stats.setdefault(s, []).append(t.get("pnl", 0))
-    if not strat_stats:
-        return "RANDOM"
-    best = max(strat_stats, key=lambda x: sum(strat_stats[x])/len(strat_stats[x]) if strat_stats[x] else -999)
-    return best
-
-def auto_tune(trade_log):
-    global auto_buy_pct
-    recent = [t for t in trade_log[-10:] if t["action"] == "SELL"]
-    pnl_sum = sum(t.get("pnl", 0) for t in recent)
-    if recent and pnl_sum > 0 and auto_buy_pct < 0.25:
-        auto_buy_pct += 0.02
-        send_discord(f"🔧 AI auto-tuning: Øker buy% til {auto_buy_pct*100:.1f}")
-    elif recent and pnl_sum < 0 and auto_buy_pct > 0.05:
-        auto_buy_pct -= 0.02
-        send_discord(f"🔧 AI auto-tuning: Senker buy% til {auto_buy_pct*100:.1f}")
-
-def hourly_report():
-    total_trades = len(trade_log)
-    realized_pnl = sum(t.get("pnl", 0) for t in trade_log if t["action"] == "SELL")
-    msg = f"📊 Hourly Report: Trades: {total_trades}, Realized PnL: {realized_pnl:.2f}%, Balance: ${balance:.2f}"
-    send_discord(msg)
-
-def ai_feedback():
-    best = best_strategy_backtest(trade_log)
-    send_discord(f"🤖 AI: Best strategy last 50: {best}")
+def check_risk_exit(symbol, price):
+    # === RiskShield: Stop-loss, take-profit, trailing stop ===
+    if holdings[symbol] == 0 or entry_price[symbol] == 0: return "HOLD"
+    gain = (price - entry_price[symbol]) / entry_price[symbol]
+    if gain <= -STOP_LOSS_PCT:
+        return "SELL"
+    if gain >= TAKE_PROFIT_PCT:
+        return "SELL"
+    if USE_TRAILING_STOP and gain > TRAIL_START_PCT:
+        if price > trailing_high[symbol]:
+            trailing_high[symbol] = price
+        elif price < trailing_high[symbol] * (1 - TRAIL_STEP_PCT):
+            return "SELL"
+    return "HOLD"
 
 def daily_report():
-    total_trades = len(trade_log)
-    realized_pnl = sum(t.get("pnl", 0) for t in trade_log if t["action"] == "SELL")
-    msg = f"🗓️ Dagsrapport: Trades: {total_trades}, Realized PnL: {realized_pnl:.2f}%, End balance: ${balance:.2f}"
+    # === InsightLogs: Daglig Discord-rapport med PnL og statistikk ===
+    realized = sum(t['pnl'] for t in trade_log if t["action"] == "SELL")
+    wins = [t for t in trade_log if t['pnl'] > 0]
+    losses = [t for t in trade_log if t['pnl'] < 0]
+    winrate = (len(wins)/len(trade_log))*100 if trade_log else 0
+    msg = (f"🗓️ Dagsrapport: Handler: {len(trade_log)}, Realisert PnL: {realized:.2f}%, "
+           f"Winrate: {winrate:.1f}%, Bal: ${balance:.2f}")
     send_discord(msg)
 
-send_discord("🟢 AtomicBot SUPERCHUNKY starter…")
-
+send_discord("🟢 AtomicBot v10 – EDGE Edition starter…")
 last_report = time.time()
-last_daily = time.time()
-start_day = time.gmtime().tm_mday
+last_daily = time.gmtime().tm_mday
 
 while True:
-    for symbol in TOKENS:
-        price, vol = get_price(symbol)
-        if price is None: continue
-        strategy = choose_strategy(symbol)
-        action = get_signal(symbol, strategy, price, holdings[symbol])
-        print(f"{symbol} | Pris: {price} | Vol: {vol} | Strategy: {strategy} | Signal: {action}")
-        if action in ("BUY", "SELL"):
-            handle_trade(symbol, action, price, strategy)
-    # Riskcontrol
-    if RISKCONTROL and balance < START_BALANCE * 0.7:
-        send_discord("🛑 PAUSE: Balanse under 70%, trading stoppet!")
-        break
-    # Rapport per REPORT_FREQ sekunder
-    if time.time() - last_report > REPORT_FREQ:
-        hourly_report()
-        ai_feedback()
-        auto_tune(trade_log)
-        last_report = time.time()
-    # Dagsrapport kl 06:00 UTC
-    utc_now = time.gmtime()
-    if utc_now.tm_hour == DAILY_REPORT_UTC and utc_now.tm_mday != start_day:
-        daily_report()
-        start_day = utc_now.tm_mday
-    time.sleep(30)
+    try:
+        for symbol in TOKENS:
+            price, prices = get_price(symbol)
+            if not price or len(prices) < 20:
+                continue
+            # === DataExpand: Flere tidsrammer/indikatorer ===
+            action, meta = choose_signal(symbol, prices)
+            risk_exit = check_risk_exit(symbol, price)
+            if holdings[symbol] > 0 and risk_exit == "SELL":
+                action = "SELL"
+            handle_trade(symbol, action, price, meta)
+        adaptive_param_tune()
+        # === InsightLogs: Rapport/Logging ===
+        if time.time() - last_report > REPORT_FREQ:
+            daily_report()
+            last_report = time.time()
+        # Dagsrapport 06:00 UTC
+        if time.gmtime().tm_hour == DAILY_REPORT_UTC and time.gmtime().tm_mday != last_daily:
+            daily_report()
+            last_daily = time.gmtime().tm_mday
+        time.sleep(30)
+    except Exception as e:
+        send_discord(f"⚠️ FailSafe: {type(e).__name__}: {e}")
+        time.sleep(5)
