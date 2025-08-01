@@ -1,7 +1,6 @@
 import os, time, random, requests
 from binance.client import Client
 
-# --- ENV VARS ---
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -108,9 +107,17 @@ def ai_feedback():
     best = get_best_strategy(trade_log)
     send_discord(f"🤖 AI: Best strategy last 30: {best}")
 
+def balance_emoji(bal):
+    if bal > START_BALANCE * 1.1: return "💚"
+    if bal > START_BALANCE * 1.02: return "🟢"
+    if bal > START_BALANCE * 0.98: return "🟡"
+    if bal > START_BALANCE * 0.8: return "🔴"
+    return "💀"
+
 send_discord("🟢 AtomicBot agent starter… (live demo mode, Binance prices!)")
 
 last_report = time.time()
+last_magic = time.time()
 
 while True:
     for symbol in TOKENS:
@@ -120,6 +127,21 @@ while True:
         print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
             handle_trade(symbol, action, price, strategy)
+    # Magi 1: Auto-pause på stort tap
+    if balance < START_BALANCE * 0.7:
+        send_discord("🛑 AtomicBot PAUSED: Balanse under 70%. Trading stoppet. #riskcontrol")
+        break
+    # Magi 3 og 5: Beste strategi, verste tap og emoji-balanse
+    if time.time() - last_magic > 600:
+        last_hour = [t for t in trade_log if t["action"] == "SELL" and t["timestamp"] > time.time() - 3600]
+        if last_hour:
+            best = max(last_hour, key=lambda t: t["pnl"])
+            worst = min(last_hour, key=lambda t: t["pnl"])
+            send_discord(f"🤖 Beste strategi siste time: {best['strategy']} {best['symbol']} ({best['pnl']:.2f}%)")
+            send_discord(f"💀 Største tap siste time: {worst['strategy']} {worst['symbol']} ({worst['pnl']:.2f}%)")
+        send_discord(f"{balance_emoji(balance)} Balanse nå: ${balance:.2f}")
+        last_magic = time.time()
+    # Vanlige rapporter og AI-feedback
     if time.time() - last_report > 60:
         hourly_report()
         ai_feedback()
