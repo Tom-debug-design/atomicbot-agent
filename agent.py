@@ -1,22 +1,19 @@
-import os, random, time, requests
+import os, time, random, requests
 from binance.client import Client
 
-# === TOGGLE: Demo eller ekte handler ===
-USE_BINANCE_LIVE = False   # False = demo/sim, True = live på Binance
+# --- ENV VARS ---
+BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
+BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 
-# === Binance-oppkobling (API fra Railway) ===
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-if USE_BINANCE_LIVE:
-    client = Client(API_KEY, API_SECRET)
+client = Client(BINANCE_API_KEY, BINANCE_API_SECRET)
 
 TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT", "TRXUSDT"
 ]
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
-START_BALANCE = 1000.0
 
+START_BALANCE = 1000.0
 balance = START_BALANCE
 holdings = {symbol: 0.0 for symbol in TOKENS}
 trade_log = []
@@ -30,16 +27,12 @@ def send_discord(msg):
         print(f"Discord error: {e}")
 
 def get_price(symbol):
-    if USE_BINANCE_LIVE:
-        try:
-            ticker = client.get_symbol_ticker(symbol=symbol)
-            return float(ticker["price"])
-        except Exception as e:
-            print(f"Binance price fetch error: {e}")
-            return None
-    else:
-        # Demo: bruk random pris (eller erstatt med annen priskilde for demo)
-        return random.uniform(0.5, 100_000)
+    try:
+        ticker = client.get_symbol_ticker(symbol=symbol)
+        return float(ticker['price'])
+    except Exception as e:
+        print(f"Binance error: {e}")
+        return None
 
 def choose_strategy():
     return random.choice(["RSI", "EMA", "RANDOM"])
@@ -47,75 +40,41 @@ def choose_strategy():
 def get_signal(strategy, price, holdings):
     if price is None: return "HOLD"
     if strategy == "RSI":
-        if price < 25 and holdings == 0:
-            return "BUY"
-        elif price > 60 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
+        if price < 25 and holdings == 0: return "BUY"
+        elif price > 60 and holdings > 0: return "SELL"
+        else: return "HOLD"
     elif strategy == "EMA":
-        if int(price) % 2 == 0 and holdings == 0:
-            return "BUY"
-        elif int(price) % 5 == 0 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
+        if int(price) % 2 == 0 and holdings == 0: return "BUY"
+        elif int(price) % 5 == 0 and holdings > 0: return "SELL"
+        else: return "HOLD"
     else:
         return random.choice(["BUY", "SELL", "HOLD"])
 
 def handle_trade(symbol, action, price, strategy):
     global balance, holdings, trade_log, auto_buy_pct
-
     if price is None: return
     amount_usd = balance * auto_buy_pct if action == "BUY" else holdings[symbol] * price
     qty = round(amount_usd / price, 6) if action == "BUY" else holdings[symbol]
     pnl = 0.0
-
-    # === LIVE mode: Bruk Binance! ===
-    if USE_BINANCE_LIVE:
-        try:
-            if action == "BUY" and balance >= amount_usd and qty > 0:
-                order = client.create_order(
-                    symbol=symbol, side=Client.SIDE_BUY,
-                    type=Client.ORDER_TYPE_MARKET, quantity=qty
-                )
-                balance -= amount_usd
-                holdings[symbol] += qty
-                send_discord(f"🟢 REAL BUY {symbol}: {qty} at ${price:.2f}, order: {order['orderId']}, balance: ${balance:.2f}")
-            elif action == "SELL" and holdings[symbol] > 0:
-                order = client.create_order(
-                    symbol=symbol, side=Client.SIDE_SELL,
-                    type=Client.ORDER_TYPE_MARKET, quantity=qty
-                )
-                proceeds = qty * price
-                last_buy = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
-                pnl = ((price - last_buy["price"]) / last_buy["price"] * 100) if last_buy else 0.0
-                balance += proceeds
-                holdings[symbol] = 0.0
-                send_discord(f"🔴 REAL SELL {symbol}: {qty} at ${price:.2f}, PnL: {pnl:.2f}%, order: {order['orderId']}, balance: ${balance:.2f}")
-        except Exception as e:
-            send_discord(f"⚠️ Binance trade error: {e}")
-    # === DEMO mode: bare simuler ===
-    else:
-        if action == "BUY" and balance >= amount_usd and qty > 0:
-            balance -= amount_usd
-            holdings[symbol] += qty
-            send_discord(f"🔵 BUY {symbol}: {qty} at ${price:.2f}, new balance ${balance:.2f}")
-            trade_log.append({
-                "symbol": symbol, "action": "BUY", "price": price,
-                "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": 0.0
-            })
-        elif action == "SELL" and holdings[symbol] > 0:
-            proceeds = qty * price
-            last_buy = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
-            pnl = ((price - last_buy["price"]) / last_buy["price"] * 100) if last_buy else 0.0
-            balance += proceeds
-            holdings[symbol] = 0.0
-            send_discord(f"🔴 SELL {symbol}: {qty} at ${price:.2f}, PnL: {pnl:.2f}%, balance: ${balance:.2f}")
-            trade_log.append({
-                "symbol": symbol, "action": "SELL", "price": price,
-                "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": pnl
-            })
+    if action == "BUY" and balance >= amount_usd and qty > 0:
+        balance -= amount_usd
+        holdings[symbol] += qty
+        send_discord(f"🔵 BUY {symbol}: {qty} at ${price:.2f}, new balance ${balance:.2f}")
+        trade_log.append({
+            "symbol": symbol, "action": "BUY", "price": price,
+            "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": 0.0
+        })
+    elif action == "SELL" and holdings[symbol] > 0:
+        proceeds = qty * price
+        last_buy = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
+        pnl = ((price - last_buy["price"]) / last_buy["price"] * 100) if last_buy else 0.0
+        balance += proceeds
+        holdings[symbol] = 0.0
+        send_discord(f"🔴 SELL {symbol}: {qty} at ${price:.2f}, PnL: {pnl:.2f}%, balance: ${balance:.2f}")
+        trade_log.append({
+            "symbol": symbol, "action": "SELL", "price": price,
+            "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": pnl
+        })
 
 def get_best_strategy(trade_log):
     recent = [t for t in trade_log[-30:] if t["action"] == "SELL"]
@@ -149,19 +108,18 @@ def ai_feedback():
     best = get_best_strategy(trade_log)
     send_discord(f"🤖 AI: Best strategy last 30: {best}")
 
-send_discord("🟢 AtomicBot agent starter…")
+send_discord("🟢 AtomicBot agent starter… (live demo mode, Binance prices!)")
 
 last_report = time.time()
 
 while True:
     for symbol in TOKENS:
         price = get_price(symbol)
-        strategy = get_best_strategy(trade_log) if len(trade_log) > 10 else choose_strategy()
+        strategy = get_best_strategy(trade_log) if len(trade_log) > 30 else choose_strategy()
         action = get_signal(strategy, price, holdings[symbol])
         print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
             handle_trade(symbol, action, price, strategy)
-    # Rapport, AI og tuning hvert 60 sek
     if time.time() - last_report > 60:
         hourly_report()
         ai_feedback()
