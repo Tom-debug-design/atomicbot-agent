@@ -127,10 +127,6 @@ while True:
         print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
             handle_trade(symbol, action, price, strategy)
-    # Magi 1: Auto-pause på stort tap
-    if balance < START_BALANCE * 0.7:
-        send_discord("🛑 AtomicBot PAUSED: Balanse under 70%. Trading stoppet. #riskcontrol")
-        break
     # Magi 3 og 5: Beste strategi, verste tap og emoji-balanse
     if time.time() - last_magic > 600:
         last_hour = [t for t in trade_log if t["action"] == "SELL" and t["timestamp"] > time.time() - 3600]
