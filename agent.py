@@ -1,15 +1,13 @@
-import random, time, os, requests
+import requests
+import os
+import time
+import random
 
 TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "ADAUSDT", "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
+    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT", "LTCUSDT", "TRXUSDT", "BCHUSDT"
 ]
-COINGECKO_MAP = {
-    "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "SOLUSDT": "solana",
-    "BNBUSDT": "binancecoin", "XRPUSDT": "ripple", "ADAUSDT": "cardano",
-    "DOGEUSDT": "dogecoin", "MATICUSDT": "matic-network",
-    "AVAXUSDT": "avalanche-2", "LINKUSDT": "chainlink"
-}
+
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 
@@ -17,12 +15,6 @@ balance = START_BALANCE
 holdings = {symbol: 0.0 for symbol in TOKENS}
 trade_log = []
 auto_buy_pct = 0.1   # Starter på 10%, tuner seg selv!
-scalping_mode = True
-MIN_PROFIT = 0.02  # Minste gevinst (2%) for scalping exit
-MAX_HOLD = 3       # Antall ticks en trade kan “vente” før forced exit
-
-last_buy_times = {symbol: 0 for symbol in TOKENS}
-buy_hold_ticks = {symbol: 0 for symbol in TOKENS}
 
 def send_discord(msg):
     print("DISCORD:", msg)
@@ -31,37 +23,22 @@ def send_discord(msg):
     except Exception as e:
         print(f"Discord error: {e}")
 
+# CHUNKY Binance LIVE price
 def get_price(symbol):
-    coingecko_id = COINGECKO_MAP.get(symbol, "bitcoin")
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
     try:
         data = requests.get(url, timeout=5).json()
-        return float(data[coingecko_id]["usd"])
+        return float(data["price"])
     except Exception as e:
-        print(f"Price fetch error: {e}")
+        print(f"Price fetch error for {symbol}: {e}")
         return None
 
 def choose_strategy():
-    return random.choice(["RSI", "EMA", "SCALP", "RANDOM"])
+    return random.choice(["RSI", "EMA", "RANDOM"])
 
-def get_signal(symbol, strategy, price, holdings):
+def get_signal(strategy, price, holdings):
     if price is None: return "HOLD"
-    # SCALPING: kjapp inn/ut hvis mulig
-    if strategy == "SCALP":
-        last = next((t for t in reversed(trade_log) if t["symbol"] == symbol and t["action"] == "BUY"), None)
-        if holdings == 0 and price > 0:
-            return "BUY"
-        # Selg hvis gevinst, eller hold for MAX_HOLD ticks
-        elif holdings > 0:
-            entry = last["price"] if last else 0
-            gain = (price - entry) / entry if entry else 0
-            buy_hold_ticks[symbol] += 1
-            if gain >= MIN_PROFIT or buy_hold_ticks[symbol] >= MAX_HOLD:
-                buy_hold_ticks[symbol] = 0
-                return "SELL"
-            else:
-                return "HOLD"
-    elif strategy == "RSI":
+    if strategy == "RSI":
         if price < 25 and holdings == 0:
             return "BUY"
         elif price > 60 and holdings > 0:
@@ -88,7 +65,6 @@ def handle_trade(symbol, action, price, strategy):
     if action == "BUY" and balance >= amount_usd and qty > 0:
         balance -= amount_usd
         holdings[symbol] += qty
-        last_buy_times[symbol] = time.time()
         send_discord(f"🔵 BUY {symbol}: {qty} at ${price:.2f}, new balance ${balance:.2f}")
         trade_log.append({
             "symbol": symbol, "action": "BUY", "price": price,
@@ -107,7 +83,7 @@ def handle_trade(symbol, action, price, strategy):
         })
 
 def get_best_strategy(trade_log):
-    recent = [t for t in trade_log[-30:] if t["action"] == "SELL"]
+    recent = [t for t in trade_log[-10:] if t["action"] == "SELL"]
     strat_stats = {}
     for t in recent:
         s = t.get("strategy", "RANDOM")
@@ -119,7 +95,7 @@ def get_best_strategy(trade_log):
 
 def auto_tune(trade_log):
     global auto_buy_pct
-    recent = [t for t in trade_log[-10:] if t["action"] == "SELL"]
+    recent = [t for t in trade_log[-5:] if t["action"] == "SELL"]
     pnl_sum = sum(t.get("pnl", 0) for t in recent)
     if recent and pnl_sum > 0 and auto_buy_pct < 0.25:
         auto_buy_pct += 0.02
@@ -136,22 +112,17 @@ def hourly_report():
 
 def ai_feedback():
     best = get_best_strategy(trade_log)
-    send_discord(f"🤖 AI: Best strategy last 30: {best}")
+    send_discord(f"🤖 AI: Best strategy last 10: {best}")
 
-send_discord("🟢 ChunkyAI Hybrid Scalper starter…")
+send_discord("🟢 AtomicBot agent starter…")
 
 last_report = time.time()
 
 while True:
     for symbol in TOKENS:
         price = get_price(symbol)
-        # Hybrid: Bytt mellom scalping/AI basert på siste resultater
-        if len(trade_log) > 30:
-            best_strategy = get_best_strategy(trade_log)
-        else:
-            best_strategy = choose_strategy()
-        strategy = "SCALP" if scalping_mode and (best_strategy in ["SCALP", "RANDOM"]) else best_strategy
-        action = get_signal(symbol, strategy, price, holdings[symbol])
+        strategy = get_best_strategy(trade_log) if len(trade_log) > 10 else choose_strategy()
+        action = get_signal(strategy, price, holdings[symbol])
         print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
         if action in ("BUY", "SELL"):
             handle_trade(symbol, action, price, strategy)
@@ -161,4 +132,4 @@ while True:
         ai_feedback()
         auto_tune(trade_log)
         last_report = time.time()
-    time.sleep(20)
+    time.sleep(30)
