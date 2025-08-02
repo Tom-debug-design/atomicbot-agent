@@ -1,7 +1,7 @@
 import random, time, os, requests
 from collections import deque, defaultdict
 from datetime import datetime, timedelta
-
+from learner import StrategyLearner
 # --- SETTINGS ---
 TOKENS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
