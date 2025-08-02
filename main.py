@@ -2,178 +2,103 @@ import random, time, os, requests
 from collections import deque, defaultdict
 from datetime import datetime, timedelta
 from learner import StrategyLearner
+
 # --- SETTINGS ---
 TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
-    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "ADAUSDT", "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "TRXUSDT"
 ]
-STRATEGIES = ["RSI", "EMA", "MEAN", "RANDOM", "SCALP"]
+STRATEGIES = ["RSI", "EMA", "MEAN", "SCALP", "RANDOM", "TREND"]
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 
-# --- DYNAMIC WINDOW + WEIGHTED EDGE ---
-class StrategyLearner:
-    def __init__(self):
-        self.base_window = 20
-        self.window_size = 20
-        self.history = deque(maxlen=30)  # alltid plass til maks window
-    def log_trade(self, strategy, token, pnl, timestamp=None):
-        self.history.append((strategy, token, pnl, timestamp))
-    def calc_volatility(self):
-        # Standardavvik av PnL siste 15 trades
-        if len(self.history) < 8: return "ukjent", 20
-        pnls = [h[2] for h in list(self.history)[-15:]]
-        mean = sum(pnls) / len(pnls)
-        stdev = (sum((x-mean)**2 for x in pnls) / len(pnls))**0.5
-        if stdev < 1: return "lav", 30
-        elif stdev < 3: return "middels", 20
-        else: return "høy", 10
-    def get_top_n_combos(self, n=5):
-        vol, window = self.calc_volatility()
-        self.window_size = window
-        history = list(self.history)[-window:]
-        # Siste 5 trades får dobbel vekt!
-        weighted = history[:-5] + history[-5:]*2 if len(history) > 5 else history
-        stats = defaultdict(list)
-        for strat, token, pnl, _ in weighted:
-            stats[(strat, token)].append(pnl)
-        ranked = sorted(stats.items(), key=lambda x: sum(x[1])/len(x[1]) if x[1] else -999, reverse=True)
-        return [combo for combo, _ in ranked[:n]]
-    def get_stats(self):
-        stats = defaultdict(list)
-        for strat, token, pnl, _ in self.history:
-            stats[(strat, token)].append(pnl)
-        return {k: sum(v)/len(v) for k,v in stats.items()}
+# --- CHUNKY EDGE AI ---
+learner = StrategyLearner(window_size=20)
+BALANCE = START_BALANCE
+trade_history = []
+last_report_time = datetime.utcnow().replace(second=0, microsecond=0)
+realized_pnl = 0.0
 
-learner = StrategyLearner()
-trade_log = []  # full historikk for rapport
-
-# --- DISCORD ---
 def send_discord(msg):
-    try:
-        requests.post(DISCORD_WEBHOOK, json={"content": msg})
-    except Exception as e:
-        print(f"Discord error: {e}")
+    if not DISCORD_WEBHOOK:
+        print("Discord webhook ikke satt!")
+        return
+    requests.post(DISCORD_WEBHOOK, json={"content": msg})
 
-# --- FAKE PRICE (demo, bytt ut med ekte pris-funksjon) ---
-def get_price(symbol):
-    return random.uniform(10, 60)
+def pick_token_and_strategy():
+    # Bruk chunky edge: velg beste strategi+token fra de siste 20 handler
+    strat, token = learner.get_best_combo()
+    if not strat or not token:
+        strat = random.choice(STRATEGIES)
+        token = random.choice(TOKENS)
+    return strat, token
 
-# --- MAIN LOOP ---
-balance = START_BALANCE
-holdings = {symbol: 0.0 for symbol in TOKENS}
-last_hourly = time.time()
-last_daily = datetime.utcnow().replace(hour=6, minute=0, second=0, microsecond=0).timestamp()
-TRADE_FREQ_SEC = 4   # juster for aggressivitet
+def execute_trade(token, strategy, bal):
+    # Simulert handler: tilfeldig retning og PnL
+    side = random.choice(["BUY", "SELL"])
+    price = round(random.uniform(0.97, 1.03) * 100, 2)  # dummy price
+    qty = round(random.uniform(10, 100), 4)
+    # Lag litt edge for beste strategi
+    pnl = random.gauss(0.2 if strategy == "SCALP" else 0, 0.5)
+    new_bal = bal + pnl
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "timestamp": timestamp,
+        "token": token,
+        "strategy": strategy,
+        "side": side,
+        "price": price,
+        "qty": qty,
+        "pnl": pnl,
+        "balance": new_bal
+    }
 
 def hourly_report():
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-    trades = [t for t in trade_log if t["timestamp"] > time.time()-3600]
-    wins = sum(1 for t in trades if t.get("pnl",0) > 0)
-    losses = sum(1 for t in trades if t.get("pnl",0) < 0)
-    realized_pnl = sum(t.get("pnl",0) for t in trades)
-    total = len(trades)
-    winrate = (wins/total*100) if total else 0
-    stratstats = defaultdict(list)
-    for t in trades:
-        stratstats[(t["strategy"], t["token"])].append(t.get("pnl",0))
-    if stratstats:
-        best = max(stratstats, key=lambda x: sum(stratstats[x])/len(stratstats[x]))
-        beststat = f"{best[0]} on {best[1]}"
-    else:
-        beststat = "n/a"
-    # Logg edge-window og volatilitet!
-    vol, window = learner.calc_volatility()
-    msg = (
-        f"📊 **Hourly report {now}**\n"
-        f"Trades: {total} | Wins: {wins} | Losses: {losses} | Win-rate: {winrate:.1f}%\n"
-        f"Realized PnL: {realized_pnl:.2f} | Best strat/token: {beststat}\n"
-        f"Edge window: {window} (volatilitet: {vol})\n"
-        f"Balance: ${balance:.2f}"
-    )
+    # PnL og winrate per strategi
+    recent_trades = trade_history[-200:]
+    strat_pnl = defaultdict(list)
+    for trade in recent_trades:
+        strat_pnl[trade["strategy"]].append(trade["pnl"])
+    msg = "📊 [CHUNKY-EDGE] Hourly report:\n"
+    msg += f"Trades: {len(recent_trades)}, Bal: ${BALANCE:.2f}, Realized PnL: {realized_pnl:.2f}\n"
+    best_strat, best_token = learner.get_best_combo()
+    best_line = f"🔥 Best: {best_strat or 'N/A'} / {best_token or 'N/A'}\n"
+    for strat in STRATEGIES:
+        pnl_list = strat_pnl[strat]
+        if pnl_list:
+            win_rate = 100 * sum(1 for p in pnl_list if p > 0) / len(pnl_list)
+            pnl_sum = sum(pnl_list)
+            msg += f"- {strat}: PnL {pnl_sum:.2f}, WR {win_rate:.1f}%\n"
+    msg += best_line
     send_discord(msg)
 
-def daily_report():
-    now = datetime.utcnow().strftime("%Y-%m-%d")
-    midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-    trades = [t for t in trade_log if t["timestamp"] > midnight]
-    wins = sum(1 for t in trades if t.get("pnl",0) > 0)
-    losses = sum(1 for t in trades if t.get("pnl",0) < 0)
-    realized_pnl = sum(t.get("pnl",0) for t in trades)
-    total = len(trades)
-    winrate = (wins/total*100) if total else 0
-    stratstats = defaultdict(list)
-    for t in trades:
-        stratstats[(t["strategy"], t["token"])].append(t.get("pnl",0))
-    if stratstats:
-        best = max(stratstats, key=lambda x: sum(stratstats[x])/len(stratstats[x]))
-        beststat = f"{best[0]} on {best[1]}"
-    else:
-        beststat = "n/a"
-    vol, window = learner.calc_volatility()
-    msg = (
-        f"📈 **Dagsrapport {now} (UTC 06:00)**\n"
-        f"Trades: {total} | Wins: {wins} | Losses: {losses} | Win-rate: {winrate:.1f}%\n"
-        f"Realized PnL: {realized_pnl:.2f} | Best strat/token: {beststat}\n"
-        f"Edge window: {window} (volatilitet: {vol})\n"
-        f"Balance: ${balance:.2f}\n"
-        f"Strategi stats: {dict(learner.get_stats())}"
-    )
-    send_discord(msg)
-
-def pick_next_combo():
-    combos = learner.get_top_n_combos(n=5)
-    if combos:
-        return random.choice(combos)
-    else:
-        return (random.choice(STRATEGIES), random.choice(TOKENS))
-
-send_discord("🟢 ChunkyBot Steg 1 starter med dynamisk edge og vektet vindu...")
+# --- MAIN LOOP ---
+print("Starter ChunkyAI AtomicBot ...")
+send_discord("❤️ Heartbeat: AtomicBot is alive at " + datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"))
 
 while True:
-    # 1. Velg strategi og token
-    strategy, symbol = pick_next_combo()
-    price = get_price(symbol)
-    holding = holdings[symbol]
+    now = datetime.utcnow()
+    # Hvert minutt, simuler trade
+    strategy, token = pick_token_and_strategy()
+    trade = execute_trade(token, strategy, BALANCE)
+    BALANCE = trade["balance"]
+    trade_history.append(trade)
+    learner.log_trade(trade["strategy"], trade["token"], trade["pnl"], trade["timestamp"])
+    realized_pnl += trade["pnl"]
 
-    # 2. Signal (veldig enkel/demo, bytt ut med ekte signalgenerator!)
-    if random.random() < 0.5:
-        action = "BUY"
-    else:
-        action = "SELL" if holding > 0 else "HOLD"
+    # Discord trade-logg
+    trade_msg = (f"[STD] {trade['side']} {trade['token']}: {trade['qty']} @ ${trade['price']}, "
+                 f"strategy: {trade['strategy']}, bal: ${BALANCE:.2f}")
+    send_discord(trade_msg)
 
-    qty = round(balance*0.1/price, 4) if action=="BUY" else holding
-    pnl = 0.0
-
-    # 3. Gjør trade og logg
-    if action == "BUY" and balance >= qty*price:
-        balance -= qty*price
-        holdings[symbol] += qty
-        trade_log.append({"action":"BUY", "symbol":symbol, "strategy":strategy, "token":symbol,
-                          "price":price, "qty":qty, "timestamp":time.time(), "pnl":0.0})
-        learner.log_trade(strategy, symbol, 0.0, time.time())
-        send_discord(f"[STD] BUY {symbol} {qty} @ ${price:.2f} | Strat: {strategy} | Bal: ${balance:.2f}")
-    elif action == "SELL" and holding > 0:
-        proceeds = holding*price
-        last_buy = next((t for t in reversed(trade_log) if t["symbol"]==symbol and t["action"]=="BUY"), None)
-        pnl = (price-last_buy["price"])/last_buy["price"]*100 if last_buy else 0.0
-        balance += proceeds
-        holdings[symbol] = 0.0
-        trade_log.append({"action":"SELL", "symbol":symbol, "strategy":strategy, "token":symbol,
-                          "price":price, "qty":holding, "timestamp":time.time(), "pnl":pnl})
-        learner.log_trade(strategy, symbol, pnl, time.time())
-        send_discord(f"[STD] SELL {symbol} {holding} @ ${price:.2f} | PnL: {pnl:.2f}% | Strat: {strategy} | Bal: ${balance:.2f}")
-
-    # 4. Time-rapport (hver time)
-    if time.time() - last_hourly > 3600:
+    # Timesrapport hver hele time
+    if now.minute == 0 and now > last_report_time:
         hourly_report()
-        last_hourly = time.time()
+        last_report_time = now.replace(second=0, microsecond=0)
+        realized_pnl = 0.0
 
-    # 5. Dagsrapport 06:00 UTC
-    now_utc = datetime.utcnow().timestamp()
-    if now_utc > last_daily:
-        daily_report()
-        tomorrow = datetime.utcnow() + timedelta(days=1)
-        last_daily = tomorrow.replace(hour=6, minute=0, second=0, microsecond=0).timestamp()
+    # Heartbeat hver 30 sek
+    if now.second % 30 == 0:
+        send_discord("❤️ Heartbeat: AtomicBot is alive at " + now.strftime("%Y-%m-%d %H:%M:%S UTC"))
 
-    time.sleep(TRADE_FREQ_SEC)
+    time.sleep(10)  # Høy frekvens, kan settes opp/ned
