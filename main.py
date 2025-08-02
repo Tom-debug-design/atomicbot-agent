@@ -11,18 +11,33 @@ STRATEGIES = ["RSI", "EMA", "MEAN", "RANDOM", "SCALP"]
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 
-# --- EDGE/LEARNER ---
+# --- DYNAMIC WINDOW + WEIGHTED EDGE ---
 class StrategyLearner:
-    def __init__(self, window_size=20):
-        self.window_size = window_size
-        self.history = deque(maxlen=window_size)  # (strategy, token, pnl, ts)
+    def __init__(self):
+        self.base_window = 20
+        self.window_size = 20
+        self.history = deque(maxlen=30)  # alltid plass til maks window
     def log_trade(self, strategy, token, pnl, timestamp=None):
         self.history.append((strategy, token, pnl, timestamp))
+    def calc_volatility(self):
+        # Standardavvik av PnL siste 15 trades
+        if len(self.history) < 8: return "ukjent", 20
+        pnls = [h[2] for h in list(self.history)[-15:]]
+        mean = sum(pnls) / len(pnls)
+        stdev = (sum((x-mean)**2 for x in pnls) / len(pnls))**0.5
+        if stdev < 1: return "lav", 30
+        elif stdev < 3: return "middels", 20
+        else: return "høy", 10
     def get_top_n_combos(self, n=5):
+        vol, window = self.calc_volatility()
+        self.window_size = window
+        history = list(self.history)[-window:]
+        # Siste 5 trades får dobbel vekt!
+        weighted = history[:-5] + history[-5:]*2 if len(history) > 5 else history
         stats = defaultdict(list)
-        for strat, token, pnl, _ in self.history:
+        for strat, token, pnl, _ in weighted:
             stats[(strat, token)].append(pnl)
-        ranked = sorted(stats.items(), key=lambda x: sum(x[1])/len(x[1]), reverse=True)
+        ranked = sorted(stats.items(), key=lambda x: sum(x[1])/len(x[1]) if x[1] else -999, reverse=True)
         return [combo for combo, _ in ranked[:n]]
     def get_stats(self):
         stats = defaultdict(list)
@@ -30,7 +45,7 @@ class StrategyLearner:
             stats[(strat, token)].append(pnl)
         return {k: sum(v)/len(v) for k,v in stats.items()}
 
-learner = StrategyLearner(window_size=20)
+learner = StrategyLearner()
 trade_log = []  # full historikk for rapport
 
 # --- DISCORD ---
@@ -67,17 +82,19 @@ def hourly_report():
         beststat = f"{best[0]} on {best[1]}"
     else:
         beststat = "n/a"
+    # Logg edge-window og volatilitet!
+    vol, window = learner.calc_volatility()
     msg = (
         f"📊 **Hourly report {now}**\n"
         f"Trades: {total} | Wins: {wins} | Losses: {losses} | Win-rate: {winrate:.1f}%\n"
         f"Realized PnL: {realized_pnl:.2f} | Best strat/token: {beststat}\n"
+        f"Edge window: {window} (volatilitet: {vol})\n"
         f"Balance: ${balance:.2f}"
     )
     send_discord(msg)
 
 def daily_report():
     now = datetime.utcnow().strftime("%Y-%m-%d")
-    # Få med alle trades siste UTC-døgn
     midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     trades = [t for t in trade_log if t["timestamp"] > midnight]
     wins = sum(1 for t in trades if t.get("pnl",0) > 0)
@@ -93,10 +110,12 @@ def daily_report():
         beststat = f"{best[0]} on {best[1]}"
     else:
         beststat = "n/a"
+    vol, window = learner.calc_volatility()
     msg = (
         f"📈 **Dagsrapport {now} (UTC 06:00)**\n"
         f"Trades: {total} | Wins: {wins} | Losses: {losses} | Win-rate: {winrate:.1f}%\n"
         f"Realized PnL: {realized_pnl:.2f} | Best strat/token: {beststat}\n"
+        f"Edge window: {window} (volatilitet: {vol})\n"
         f"Balance: ${balance:.2f}\n"
         f"Strategi stats: {dict(learner.get_stats())}"
     )
@@ -109,7 +128,7 @@ def pick_next_combo():
     else:
         return (random.choice(STRATEGIES), random.choice(TOKENS))
 
-send_discord("🟢 ChunkyBot starter v3 med edge, times- og dagsrapport...")
+send_discord("🟢 ChunkyBot Steg 1 starter med dynamisk edge og vektet vindu...")
 
 while True:
     # 1. Velg strategi og token
@@ -154,7 +173,6 @@ while True:
     now_utc = datetime.utcnow().timestamp()
     if now_utc > last_daily:
         daily_report()
-        # Sett neste rapport til 06:00 i morgen
         tomorrow = datetime.utcnow() + timedelta(days=1)
         last_daily = tomorrow.replace(hour=6, minute=0, second=0, microsecond=0).timestamp()
 
