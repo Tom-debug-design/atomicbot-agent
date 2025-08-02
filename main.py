@@ -1,165 +1,125 @@
-import os
-import random
-import time
-import datetime
+import random, time, os, requests
+from collections import deque, defaultdict
+from datetime import datetime
 
+# --- SETTINGS ---
 TOKENS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
-    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "TRXUSDT"
+    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
 ]
+STRATEGIES = ["RSI", "EMA", "MEAN", "RANDOM", "SCALP"]
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
-TRADE_SIZE = 0.03
-TP = 0.002
-SL = 0.002
-STOP_LOSS_PCT = 0.07
-TRAIL_START_PCT = 0.03
-TRAIL_STEP_PCT = 0.02
-STRATEGIES = ["RANDOM", "RSI", "EMA", "SCALP", "MEAN", "TREND"]
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "https://discord.com/api/webhooks/...")
 
-balance = START_BALANCE
-holdings = {token: 0 for token in TOKENS}
-entry = {token: None for token in TOKENS}
-peak = {token: None for token in TOKENS}
-trade_log = []
-strat_stats = {s: {"wins": 0, "loss": 0, "last_pnl": []} for s in STRATEGIES}
-tap_counter = 0
-strategy = "RANDOM"
-total_trades = 0
+# --- EDGE/LEARNER ---
+class StrategyLearner:
+    def __init__(self, window_size=20):
+        self.window_size = window_size
+        self.history = deque(maxlen=window_size)  # (strategy, token, pnl, ts)
+    def log_trade(self, strategy, token, pnl, timestamp=None):
+        self.history.append((strategy, token, pnl, timestamp))
+    def get_top_n_combos(self, n=5):
+        stats = defaultdict(list)
+        for strat, token, pnl, _ in self.history:
+            stats[(strat, token)].append(pnl)
+        ranked = sorted(stats.items(), key=lambda x: sum(x[1])/len(x[1]), reverse=True)
+        return [combo for combo, _ in ranked[:n]]
+    def get_stats(self):
+        stats = defaultdict(list)
+        for strat, token, pnl, _ in self.history:
+            stats[(strat, token)].append(pnl)
+        return {k: sum(v)/len(v) for k,v in stats.items()}
 
+learner = StrategyLearner(window_size=20)
+trade_log = []  # full historikk for rapport
+
+# --- DISCORD ---
 def send_discord(msg):
-    print(msg)
-    # import requests
-    # try:
-    #     requests.post(DISCORD_WEBHOOK, json={"content": msg})
-    # except Exception as e:
-    #     print("DC error", e)
+    try:
+        requests.post(DISCORD_WEBHOOK, json={"content": msg})
+    except Exception as e:
+        print(f"Discord error: {e}")
 
-def get_price(token):
-    base = {
-        "BTCUSDT": 30000, "ETHUSDT": 1700, "SOLUSDT": 20, "BNBUSDT": 250, "XRPUSDT": 0.6,
-        "ADAUSDT": 0.4, "DOGEUSDT": 0.07, "AVAXUSDT": 10, "LINKUSDT": 6, "TRXUSDT": 0.07
-    }
-    return round(base[token] * random.uniform(0.98, 1.02), 2)
+# --- FAKE PRICE (demo, bytt ut med ekte pris-funksjon) ---
+def get_price(symbol):
+    return random.uniform(10, 60)
 
-def select_strategy():
-    global strategy, tap_counter
-    # AI: Velg den strategien med best winrate siste 20 trades
-    if total_trades >= 20:
-        best = max(STRATEGIES, key=lambda s: sum(strat_stats[s]["last_pnl"][-20:]))
-        if best != strategy:
-            send_discord(f"🔄 [CHUNKY-EDGE][AI] Switching to best strategy: {best}")
-        strategy = best
-        tap_counter = 0
-    # Rapid switch ved mange tap
-    if tap_counter >= 3:
-        old_strategy = strategy
-        strategy = random.choice([s for s in STRATEGIES if s != strategy])
-        send_discord(f"🔄 [CHUNKY-EDGE][Rapid] Forced switch: {old_strategy} → {strategy} etter {tap_counter} tap!")
-        tap_counter = 0
-    return strategy
+# --- MAIN LOOP ---
+balance = START_BALANCE
+holdings = {symbol: 0.0 for symbol in TOKENS}
+last_report = time.time()
+TRADE_FREQ_SEC = 4   # juster for aggressivitet
 
-def calc_signal(token, strategy):
-    price = get_price(token)
-    if price is None:
-        return None, "HOLD"
-    if strategy == "RANDOM":
-        return price, random.choice(["BUY", "SELL", "HOLD"])
-    elif strategy == "RSI":
-        rsi = random.uniform(10, 90)
-        if rsi < 30: return price, "BUY"
-        elif rsi > 70: return price, "SELL"
-        else: return price, "HOLD"
-    elif strategy == "EMA":
-        ema = price * random.uniform(0.98, 1.02)
-        if price < ema: return price, "BUY"
-        else: return price, "SELL"
-    elif strategy == "SCALP":
-        if random.random() > 0.5: return price, "BUY"
-        else: return price, "SELL"
-    elif strategy == "MEAN":
-        # Mean reversion: Kjøp hvis faller mye, selg hvis stiger mye
-        if random.random() < 0.05: return price, "BUY"
-        elif random.random() > 0.95: return price, "SELL"
-        else: return price, "HOLD"
-    elif strategy == "TREND":
-        # Trend: Fortsett siste retning
-        last_trades = [t for t in trade_log[-5:] if t["token"] == token]
-        if last_trades:
-            last = last_trades[-1]
-            if last["action"] == "BUY": return price, "BUY"
-            else: return price, "SELL"
-        return price, random.choice(["BUY", "SELL"])
-    return price, "HOLD"
+def hourly_report():
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    trades = [t for t in trade_log if t["timestamp"] > time.time()-3600]
+    wins = sum(1 for t in trades if t.get("pnl",0) > 0)
+    losses = sum(1 for t in trades if t.get("pnl",0) < 0)
+    realized_pnl = sum(t.get("pnl",0) for t in trades)
+    total = len(trades)
+    winrate = (wins/total*100) if total else 0
+    stratstats = defaultdict(list)
+    for t in trades:
+        stratstats[(t["strategy"], t["token"])].append(t.get("pnl",0))
+    if stratstats:
+        best = max(stratstats, key=lambda x: sum(stratstats[x])/len(stratstats[x]))
+        beststat = f"{best[0]} on {best[1]}"
+    else:
+        beststat = "n/a"
+    msg = (
+        f"📊 **Hourly report {now}**\n"
+        f"Trades: {total} | Wins: {wins} | Losses: {losses} | Win-rate: {winrate:.1f}%\n"
+        f"Realized PnL: {realized_pnl:.2f} | Best strat/token: {beststat}\n"
+        f"Balance: ${balance:.2f}"
+    )
+    send_discord(msg)
 
-def now():
-    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+def pick_next_combo():
+    combos = learner.get_top_n_combos(n=5)
+    if combos:
+        return random.choice(combos)
+    else:
+        return (random.choice(STRATEGIES), random.choice(TOKENS))
 
-def handle_trade(token, action, price, strategy, edge=False, edge_type=""):
-    global balance, tap_counter, total_trades
-    qty = round(balance * TRADE_SIZE / price, 6)
-    pnl = 0
-    label = "[CHUNKY-EDGE]" if edge else "[STD]"
-    if edge_type:
-        label += f" [{edge_type}]"
-    if action == "BUY" and balance > price * qty:
-        balance -= price * qty
-        holdings[token] += qty
-        entry[token] = price
-        peak[token] = price
-        send_discord(f"{label} BUY {token}: {qty} @ ${price}, strategy: {strategy}, bal: ${round(balance,2)}")
-        trade_log.append({"token": token, "action": "BUY", "price": price, "qty": qty, "strategy": strategy, "pnl": 0, "timestamp": now()})
-    elif action == "SELL" and holdings[token] > 0:
-        last_entry = entry[token] if entry[token] else price
-        balance += price * holdings[token]
-        pnl = (price - last_entry) * holdings[token]
-        if pnl < 0:
-            tap_counter += 1
-            strat_stats[strategy]["loss"] += 1
-        else:
-            tap_counter = 0
-            strat_stats[strategy]["wins"] += 1
-        strat_stats[strategy]["last_pnl"].append(pnl)
-        send_discord(f"{label} SELL {token}: {holdings[token]} @ ${price}, PnL: {round(pnl,2)}, bal: ${round(balance,2)}")
-        trade_log.append({"token": token, "action": "SELL", "price": price, "qty": holdings[token], "strategy": strategy, "pnl": pnl, "timestamp": now()})
-        holdings[token] = 0
-        entry[token] = None
-        peak[token] = None
-    total_trades += 1
+send_discord("🟢 ChunkyBot starter v2...")
 
-def check_edge_exit(token, price):
-    if holdings[token] > 0 and entry[token]:
-        gain = (price - entry[token]) / entry[token]
-        if gain > TRAIL_START_PCT:
-            if price > peak[token]:
-                peak[token] = price
-            elif price < peak[token] * (1 - TRAIL_STEP_PCT):
-                send_discord(f"🔥 [CHUNKY-EDGE][Trailing] Trailing stop utløst – SELL {token} på ${price}!")
-                return "SELL", True, "Trailing"
-        if gain < -STOP_LOSS_PCT:
-            send_discord(f"🔥 [CHUNKY-EDGE][Stoploss] Stop loss utløst – SELL {token} på ${price} (PnL: {round(gain*100,2)}%)!")
-            return "SELL", True, "Stoploss"
-    return "HOLD", False, ""
+while True:
+    # 1. Velg strategi og token
+    strategy, symbol = pick_next_combo()
+    price = get_price(symbol)
+    holding = holdings[symbol]
 
-def main_loop():
-    send_discord(f"🤖 [CHUNKY-EDGE] AtomicBot Super Edge {now()} – klar for AI-action!")
-    global total_trades
-    while True:
-        for token in TOKENS:
-            try:
-                strat = select_strategy()
-                price, signal = calc_signal(token, strat)
-                edge_action, is_edge, edge_type = check_edge_exit(token, price)
-                if edge_action == "SELL":
-                    handle_trade(token, "SELL", price, strat, edge=True, edge_type=edge_type)
-                if signal in ["BUY", "SELL"]:
-                    handle_trade(token, signal, price, strat, edge=False)
-            except Exception as e:
-                send_discord(f"❌ [CHUNKY-EDGE] ERROR {token}: {e}")
-        if total_trades % 10 == 0:
-            best_strat = max(STRATEGIES, key=lambda s: sum(strat_stats[s]["last_pnl"][-20:]) if strat_stats[s]["last_pnl"] else 0)
-            send_discord(f"📊 [CHUNKY-EDGE] Trades: {total_trades}, Bal: ${round(balance,2)}, Best strat: {best_strat}")
-        time.sleep(10)
+    # 2. Signal (veldig enkel/demo, bytt ut med ekte signalgenerator!)
+    if random.random() < 0.5:
+        action = "BUY"
+    else:
+        action = "SELL" if holding > 0 else "HOLD"
 
-if __name__ == "__main__":
-    main_loop()
+    qty = round(balance*0.1/price, 4) if action=="BUY" else holding
+    pnl = 0.0
+
+    # 3. Gjør trade og logg
+    if action == "BUY" and balance >= qty*price:
+        balance -= qty*price
+        holdings[symbol] += qty
+        trade_log.append({"action":"BUY", "symbol":symbol, "strategy":strategy, "token":symbol,
+                          "price":price, "qty":qty, "timestamp":time.time(), "pnl":0.0})
+        learner.log_trade(strategy, symbol, 0.0, time.time())
+        send_discord(f"[STD] BUY {symbol} {qty} @ ${price:.2f} | Strat: {strategy} | Bal: ${balance:.2f}")
+    elif action == "SELL" and holding > 0:
+        proceeds = holding*price
+        last_buy = next((t for t in reversed(trade_log) if t["symbol"]==symbol and t["action"]=="BUY"), None)
+        pnl = (price-last_buy["price"])/last_buy["price"]*100 if last_buy else 0.0
+        balance += proceeds
+        holdings[symbol] = 0.0
+        trade_log.append({"action":"SELL", "symbol":symbol, "strategy":strategy, "token":symbol,
+                          "price":price, "qty":holding, "timestamp":time.time(), "pnl":pnl})
+        learner.log_trade(strategy, symbol, pnl, time.time())
+        send_discord(f"[STD] SELL {symbol} {holding} @ ${price:.2f} | PnL: {pnl:.2f}% | Strat: {strategy} | Bal: ${balance:.2f}")
+
+    # 4. Time-rapport
+    if time.time() - last_report > 3600:
+        hourly_report()
+        last_report = time.time()
+
+    time.sleep(TRADE_FREQ_SEC)
