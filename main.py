@@ -1,6 +1,6 @@
 import random, time, os, requests
 from collections import deque, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # --- SETTINGS ---
 TOKENS = [
@@ -47,7 +47,8 @@ def get_price(symbol):
 # --- MAIN LOOP ---
 balance = START_BALANCE
 holdings = {symbol: 0.0 for symbol in TOKENS}
-last_report = time.time()
+last_hourly = time.time()
+last_daily = datetime.utcnow().replace(hour=6, minute=0, second=0, microsecond=0).timestamp()
 TRADE_FREQ_SEC = 4   # juster for aggressivitet
 
 def hourly_report():
@@ -74,6 +75,33 @@ def hourly_report():
     )
     send_discord(msg)
 
+def daily_report():
+    now = datetime.utcnow().strftime("%Y-%m-%d")
+    # Få med alle trades siste UTC-døgn
+    midnight = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    trades = [t for t in trade_log if t["timestamp"] > midnight]
+    wins = sum(1 for t in trades if t.get("pnl",0) > 0)
+    losses = sum(1 for t in trades if t.get("pnl",0) < 0)
+    realized_pnl = sum(t.get("pnl",0) for t in trades)
+    total = len(trades)
+    winrate = (wins/total*100) if total else 0
+    stratstats = defaultdict(list)
+    for t in trades:
+        stratstats[(t["strategy"], t["token"])].append(t.get("pnl",0))
+    if stratstats:
+        best = max(stratstats, key=lambda x: sum(stratstats[x])/len(stratstats[x]))
+        beststat = f"{best[0]} on {best[1]}"
+    else:
+        beststat = "n/a"
+    msg = (
+        f"📈 **Dagsrapport {now} (UTC 06:00)**\n"
+        f"Trades: {total} | Wins: {wins} | Losses: {losses} | Win-rate: {winrate:.1f}%\n"
+        f"Realized PnL: {realized_pnl:.2f} | Best strat/token: {beststat}\n"
+        f"Balance: ${balance:.2f}\n"
+        f"Strategi stats: {dict(learner.get_stats())}"
+    )
+    send_discord(msg)
+
 def pick_next_combo():
     combos = learner.get_top_n_combos(n=5)
     if combos:
@@ -81,7 +109,7 @@ def pick_next_combo():
     else:
         return (random.choice(STRATEGIES), random.choice(TOKENS))
 
-send_discord("🟢 ChunkyBot starter v2...")
+send_discord("🟢 ChunkyBot starter v3 med edge, times- og dagsrapport...")
 
 while True:
     # 1. Velg strategi og token
@@ -117,9 +145,17 @@ while True:
         learner.log_trade(strategy, symbol, pnl, time.time())
         send_discord(f"[STD] SELL {symbol} {holding} @ ${price:.2f} | PnL: {pnl:.2f}% | Strat: {strategy} | Bal: ${balance:.2f}")
 
-    # 4. Time-rapport
-    if time.time() - last_report > 3600:
+    # 4. Time-rapport (hver time)
+    if time.time() - last_hourly > 3600:
         hourly_report()
-        last_report = time.time()
+        last_hourly = time.time()
+
+    # 5. Dagsrapport 06:00 UTC
+    now_utc = datetime.utcnow().timestamp()
+    if now_utc > last_daily:
+        daily_report()
+        # Sett neste rapport til 06:00 i morgen
+        tomorrow = datetime.utcnow() + timedelta(days=1)
+        last_daily = tomorrow.replace(hour=6, minute=0, second=0, microsecond=0).timestamp()
 
     time.sleep(TRADE_FREQ_SEC)
