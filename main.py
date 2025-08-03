@@ -1,21 +1,22 @@
-import random, time, os, requests
-from collections import deque
-from datetime import datetime
-import numpy as np
-from learner import ChunkyEdgeLearner
+import random, time, os, requests, json
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from datetime import datetime, timedelta
 
 TOKENS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT",
     "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "XRPUSDT", "TRXUSDT", "LINKUSDT"
 ]
-STRATEGIES = ["RSI", "MEAN", "TREND", "RANDOM"]
+STRATEGIES = ["RSI", "MEAN", "TREND", "RANDOM", "SCALP", "EMA"]
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 
-learner = ChunkyEdgeLearner(ban_threshold=-5, ban_window=20, boost_window=20)
-BALANCE = START_BALANCE
 trade_history = []
-last_report_time = datetime.utcnow().replace(second=0, microsecond=0)
+BALANCE = START_BALANCE
+
+# ---- Chunky Parameter ----
+RUN_ANALYSIS_EVERY = 3600  # sekunder mellom Rainy Forest AI (default: 1 time)
+last_analysis = time.time()
 
 def send_discord(msg):
     if not DISCORD_WEBHOOK:
@@ -26,46 +27,72 @@ def send_discord(msg):
     except Exception as e:
         print(f"Discord feil: {e}")
 
-def pick_combo():
-    # Prioriter whitelist, ellers random av de som ikke er bannet
-    combo = learner.get_suggested_combo()
-    if combo:
-        strategy, token = combo
-    else:
-        # fallback: random combo uten ban
-        valid = [(s, t) for s in STRATEGIES for t in TOKENS if (s, t) not in learner.banlist]
-        if not valid:
-            strategy, token = random.choice(STRATEGIES), random.choice(TOKENS)
-        else:
-            strategy, token = random.choice(valid)
-    return strategy, token
+def chunky_rainy_forest(trades):
+    if len(trades) < 40:
+        print("For få trades for Rainy Forest, venter...")
+        return {t: random.choice(STRATEGIES) for t in TOKENS}
+    df = pd.DataFrame(trades)
+    df['is_win'] = df['pnl'] > 0
+    df['hour'] = pd.to_datetime(df['timestamp'], unit='s').dt.hour
+    df['token_id'] = pd.factorize(df['token'])[0]
+    df['strategy_id'] = pd.factorize(df['strategy'])[0]
+    features = ['token_id', 'strategy_id', 'hour']
+    X = df[features]
+    y = df['is_win']
+    rf = RandomForestClassifier(n_estimators=80, max_depth=7, random_state=42)
+    rf.fit(X, y)
+    combos = df.groupby(['token', 'strategy']).size().reset_index().drop(0, axis=1)
+    combos['token_id'] = pd.factorize(combos['token'])[0]
+    combos['strategy_id'] = pd.factorize(combos['strategy'])[0]
+    ai_best = {}
+    for token in combos['token'].unique():
+        best_score = -1
+        best_strategy = None
+        for _, row in combos[combos['token'] == token].iterrows():
+            test_X = [[row['token_id'], row['strategy_id'], 12]]
+            score = rf.predict_proba(test_X)[0][1]
+            if score > best_score:
+                best_score = score
+                best_strategy = row['strategy']
+        ai_best[token] = best_strategy
+    print(f"[RAINY FOREST] Oppdatert AI-best-strategier: {ai_best}")
+    return ai_best
 
-for i in range(1, 1001):  # Dummy loop (bytt til din egen live-loop!)
-    strategy, token = pick_combo()
+# ---- Første AI-run (initielt tilfeldig) ----
+ai_best = {t: random.choice(STRATEGIES) for t in TOKENS}
+
+def pick_token_and_strategy():
+    token = random.choice(TOKENS)
+    strategy = ai_best.get(token, random.choice(STRATEGIES))
+    return token, strategy
+
+start_time = time.time()
+while True:
+    # ---- Kjør Rainy Forest AI (auto hver time) ----
+    if time.time() - last_analysis > RUN_ANALYSIS_EVERY:
+        if trade_history:
+            ai_best = chunky_rainy_forest(trade_history)
+            send_discord(f"[RAINY FOREST] AI-best-strategier oppdatert! 🚦 {ai_best}")
+        last_analysis = time.time()
+    # ---- Lag trade ----
+    token, strategy = pick_token_and_strategy()
     price = random.uniform(0.5, 2.0) * 100
     qty = random.uniform(1, 5)
     direction = random.choice(["BUY", "SELL"])
-    pnl = round(random.uniform(-2, 2), 2)  # dummy PnL
-    learner.log_trade(strategy, token, pnl)
-    trade_history.append((datetime.utcnow(), strategy, token, direction, price, qty, pnl))
+    pnl = round(random.uniform(-2, 2), 2)
+    trade = {
+        "timestamp": time.time(),
+        "token": token,
+        "strategy": strategy,
+        "direction": direction,
+        "price": price,
+        "qty": qty,
+        "pnl": pnl,
+    }
+    trade_history.append(trade)
     BALANCE += pnl
-
-    if i % 20 == 0:
-        lists = learner.get_lists()
-        msg = f"[CHUNKY-V4] Trade {i}, BAL: {round(BALANCE,2)}, {direction} {token} {qty}@{round(price,2)}, PnL: {pnl}, Edge: {strategy}\n"
-        msg += f"Whitelist: {lists['whitelist']}\nBanlist: {lists['banlist']}"
+    # ---- Rapport hver 20. trade ----
+    if len(trade_history) % 20 == 0:
+        msg = f"[CHUNKY-RAINY] Trade {len(trade_history)}, BAL: {round(BALANCE,2)}, {direction} {token} {qty}@{round(price,2)}, PnL: {pnl}, Edge: {strategy}"
         send_discord(msg)
-
-# Eksempel på timesrapport (tilpass for live-loop)
-def hourly_report():
-    last20 = trade_history[-20:]
-    stats = {}
-    for s in STRATEGIES:
-        s_pnls = [t[6] for t in last20 if t[1] == s]
-        stats[s] = round(np.mean(s_pnls), 2) if s_pnls else 0.0
-    best_strategy = max(stats.items(), key=lambda x: x[1])[0]
-    lists = learner.get_lists()
-    msg = f"\n[CHUNKY-V4] Hourly report:\n" + "\n".join([f"{k}: {v}" for k,v in stats.items()]) + f"\n🔥 Best: {best_strategy}\nWhitelist: {lists['whitelist']}\nBanlist: {lists['banlist']}"
-    send_discord(msg)
-
-# hourly_report()  # kall denne i loop/live
+    time.sleep(2)  # Juster trade-frekvens her (2 sek demo)
