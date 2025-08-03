@@ -1,22 +1,41 @@
-import random, time, os, requests, json
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+import random, time, os, requests
+from collections import deque, defaultdict
 from datetime import datetime, timedelta
+import numpy as np
 
+from learner import StrategyLearner
+
+# --- SETTINGS ---
 TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT",
-    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "XRPUSDT", "TRXUSDT", "LINKUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT",
+    "MATICUSDT", "AVAXUSDT", "XRPUSDT", "TRXUSDT", "LINKUSDT"
 ]
-STRATEGIES = ["RSI", "MEAN", "TREND", "RANDOM", "SCALP", "EMA"]
+STRATEGIES = ["RSI", "EMA", "MEAN", "SCALP", "TREND", "RANDOM"]
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 
-trade_history = []
-BALANCE = START_BALANCE
+# --- STOP LOSS SETTINGS ---
+PER_TRADE_STOP = 0.03     # 3 % per trade
+PER_STRATEGY_LOSS = 10    # $10 i tap på én time
+PER_STRATEGY_LOSS_TRADES = 5  # 5 tap på rad
+GLOBAL_STOP = 800
+GLOBAL_PAUSE_MINUTES = 30
 
-# ---- Chunky Parameter ----
-RUN_ANALYSIS_EVERY = 3600  # sekunder mellom Rainy Forest AI (default: 1 time)
-last_analysis = time.time()
+# --- EDGE LEARNER ---
+learner = StrategyLearner(base_window=20, min_window=10, max_window=30)
+BALANCE = START_BALANCE
+trade_history = []
+last_report_time = datetime.utcnow().replace(second=0, microsecond=0)
+realized_pnl = 0.0
+
+# --- STRATEGI-STATISTIKK FOR PAUSE ---
+strategy_loss = defaultdict(float)
+strategy_loss_trades = defaultdict(int)
+strategy_paused_until = {}
+
+# --- GLOBAL PAUSE ---
+PAUSE_MODE = False
+pause_until = None
 
 def send_discord(msg):
     if not DISCORD_WEBHOOK:
@@ -25,74 +44,82 @@ def send_discord(msg):
     try:
         requests.post(DISCORD_WEBHOOK, json={"content": msg})
     except Exception as e:
-        print(f"Discord feil: {e}")
+        print(f"Discord-feil: {e}")
 
-def chunky_rainy_forest(trades):
-    if len(trades) < 40:
-        print("For få trades for Rainy Forest, venter...")
-        return {t: random.choice(STRATEGIES) for t in TOKENS}
-    df = pd.DataFrame(trades)
-    df['is_win'] = df['pnl'] > 0
-    df['hour'] = pd.to_datetime(df['timestamp'], unit='s').dt.hour
-    df['token_id'] = pd.factorize(df['token'])[0]
-    df['strategy_id'] = pd.factorize(df['strategy'])[0]
-    features = ['token_id', 'strategy_id', 'hour']
-    X = df[features]
-    y = df['is_win']
-    rf = RandomForestClassifier(n_estimators=80, max_depth=7, random_state=42)
-    rf.fit(X, y)
-    combos = df.groupby(['token', 'strategy']).size().reset_index().drop(0, axis=1)
-    combos['token_id'] = pd.factorize(combos['token'])[0]
-    combos['strategy_id'] = pd.factorize(combos['strategy'])[0]
-    ai_best = {}
-    for token in combos['token'].unique():
-        best_score = -1
-        best_strategy = None
-        for _, row in combos[combos['token'] == token].iterrows():
-            test_X = [[row['token_id'], row['strategy_id'], 12]]
-            score = rf.predict_proba(test_X)[0][1]
-            if score > best_score:
-                best_score = score
-                best_strategy = row['strategy']
-        ai_best[token] = best_strategy
-    print(f"[RAINY FOREST] Oppdatert AI-best-strategier: {ai_best}")
-    return ai_best
+def handle_global_pause():
+    global PAUSE_MODE, pause_until
+    now = datetime.utcnow()
+    if BALANCE < GLOBAL_STOP:
+        if not PAUSE_MODE:
+            PAUSE_MODE = True
+            pause_until = now + timedelta(minutes=GLOBAL_PAUSE_MINUTES)
+            send_discord(f"🔴 GLOBAL STOP LOSS! Bot paused for {GLOBAL_PAUSE_MINUTES} min. Balance: ${BALANCE:.2f}")
+    else:
+        if PAUSE_MODE and now >= pause_until:
+            PAUSE_MODE = False
+            send_discord(f"🟢 Bot resumed after global stop loss. Balance: ${BALANCE:.2f}")
 
-# ---- Første AI-run (initielt tilfeldig) ----
-ai_best = {t: random.choice(STRATEGIES) for t in TOKENS}
+def handle_strategy_pause(strategy):
+    now = datetime.utcnow()
+    if (strategy_loss[strategy] <= -PER_STRATEGY_LOSS or
+        strategy_loss_trades[strategy] >= PER_STRATEGY_LOSS_TRADES):
+        strategy_paused_until[strategy] = now + timedelta(hours=1)
+        send_discord(f"⏸️ Strategy {strategy} paused for 1 hour (too many losses)")
+        # Reset counters
+        strategy_loss[strategy] = 0
+        strategy_loss_trades[strategy] = 0
 
-def pick_token_and_strategy():
-    token = random.choice(TOKENS)
-    strategy = ai_best.get(token, random.choice(STRATEGIES))
-    return token, strategy
+def is_strategy_paused(strategy):
+    now = datetime.utcnow()
+    until = strategy_paused_until.get(strategy)
+    return until is not None and now < until
 
-start_time = time.time()
-while True:
-    # ---- Kjør Rainy Forest AI (auto hver time) ----
-    if time.time() - last_analysis > RUN_ANALYSIS_EVERY:
-        if trade_history:
-            ai_best = chunky_rainy_forest(trade_history)
-            send_discord(f"[RAINY FOREST] AI-best-strategier oppdatert! 🚦 {ai_best}")
-        last_analysis = time.time()
-    # ---- Lag trade ----
-    token, strategy = pick_token_and_strategy()
-    price = random.uniform(0.5, 2.0) * 100
-    qty = random.uniform(1, 5)
-    direction = random.choice(["BUY", "SELL"])
-    pnl = round(random.uniform(-2, 2), 2)
-    trade = {
-        "timestamp": time.time(),
-        "token": token,
-        "strategy": strategy,
-        "direction": direction,
-        "price": price,
-        "qty": qty,
-        "pnl": pnl,
-    }
-    trade_history.append(trade)
+def trade(token, strategy):
+    global BALANCE, realized_pnl
+
+    if PAUSE_MODE or is_strategy_paused(strategy):
+        return
+
+    # Dummy trade logic, replace with real trading code!
+    entry_price = random.uniform(0.95, 1.05)
+    direction = random.choice([-1, 1])
+    size = random.uniform(20, 50)
+    exit_price = entry_price + direction * entry_price * random.uniform(0.001, 0.04)
+    pnl = (exit_price - entry_price) * size
     BALANCE += pnl
-    # ---- Rapport hver 20. trade ----
-    if len(trade_history) % 20 == 0:
-        msg = f"[CHUNKY-RAINY] Trade {len(trade_history)}, BAL: {round(BALANCE,2)}, {direction} {token} {qty}@{round(price,2)}, PnL: {pnl}, Edge: {strategy}"
-        send_discord(msg)
-    time.sleep(2)  # Juster trade-frekvens her (2 sek demo)
+    realized_pnl += pnl
+    trade_history.append((datetime.utcnow(), token, strategy, pnl, size, entry_price, exit_price))
+
+    # --- Per-trade stop loss ---
+    if pnl < -PER_TRADE_STOP * size * entry_price:
+        send_discord(f"🛑 STOP LOSS: Trade on {token} {strategy} closed at {pnl:.2f}$ (auto-exit)")
+        # Optionally close/mark trade here
+
+    # --- Per-strategy ---
+    if pnl < 0:
+        strategy_loss[strategy] += pnl
+        strategy_loss_trades[strategy] += 1
+        handle_strategy_pause(strategy)
+    else:
+        strategy_loss_trades[strategy] = 0
+
+def main_loop():
+    global BALANCE
+    while True:
+        handle_global_pause()
+
+        if PAUSE_MODE:
+            time.sleep(10)
+            continue
+
+        token = random.choice(TOKENS)
+        strategy = random.choice(STRATEGIES)
+        if is_strategy_paused(strategy):
+            continue
+        trade(token, strategy)
+
+        # Rapporter hver time eller hva du ønsker
+        time.sleep(1)
+
+if __name__ == "__main__":
+    main_loop()
