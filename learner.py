@@ -1,40 +1,45 @@
 from collections import deque, defaultdict
 import numpy as np
 
-class StrategyLearner:
-    def __init__(self, base_window=20, min_window=10, max_window=30):
-        self.base_window = base_window
-        self.min_window = min_window
-        self.max_window = max_window
-        self.window_size = base_window
-        self.history = deque(maxlen=self.max_window)  # lagrer alle siste trades
-
-    def update_window(self, volatility):
-        # Dynamisk window: mindre ved høy volatilitet, større ved lav volatilitet
-        if volatility > 0.03:
-            self.window_size = self.min_window
-        elif volatility < 0.01:
-            self.window_size = self.max_window
-        else:
-            self.window_size = self.base_window
+class ChunkyEdgeLearner:
+    def __init__(self, ban_threshold=-5, ban_window=20, boost_window=20):
+        self.ban_window = ban_window
+        self.boost_window = boost_window
+        self.ban_threshold = ban_threshold
+        self.history = deque(maxlen=max(self.ban_window, self.boost_window))
+        self.banlist = set()
+        self.whitelist = set()
 
     def log_trade(self, strategy, token, pnl):
         self.history.append((strategy, token, pnl))
+        self.update_lists()
 
-    def get_weighted_edge_combo(self):
-        if len(self.history) == 0:
-            return None, None
-
-        # Bruk siste window_size trades, og vekter de ferskeste høyest
-        window_trades = list(self.history)[-self.window_size:]
-        n = len(window_trades)
+    def update_lists(self):
+        # Telle PnL siste X trades for alle combos
         stats = defaultdict(list)
-        weights = np.linspace(0.3, 1, n)  # Gir de siste høyest vekt
-        for i, (strategy, token, pnl) in enumerate(window_trades):
-            stats[(strategy, token)].append(pnl * weights[i])
+        for strat, token, pnl in self.history:
+            stats[(strat, token)].append(pnl)
+        # Oppdater banlist
+        for (strat, token), pnl_list in stats.items():
+            if len(pnl_list) >= self.ban_window and sum(pnl_list[-self.ban_window:]) < self.ban_threshold:
+                self.banlist.add((strat, token))
+            else:
+                self.banlist.discard((strat, token))
+        # Oppdater whitelist (boosted edge: de beste)
+        avg_pnls = {k: np.mean(v[-self.boost_window:]) for k,v in stats.items() if len(v) >= self.boost_window}
+        if avg_pnls:
+            best = sorted(avg_pnls, key=avg_pnls.get, reverse=True)[:3]
+            self.whitelist = set(best)
 
-        avg_pnls = {k: np.sum(v)/len(v) for k, v in stats.items()}
-        if not avg_pnls:
-            return None, None
-        best_combo = max(avg_pnls.items(), key=lambda x: x[1])[0]
-        return best_combo
+    def get_suggested_combo(self):
+        # Velg først fra whitelist, ellers random av de ikke bannede
+        pool = list(self.whitelist) or [k for k in {(strat, token) for strat, token, _ in self.history} if k not in self.banlist]
+        if pool:
+            return pool[np.random.randint(len(pool))]
+        return None
+
+    def get_lists(self):
+        return {
+            "banlist": list(self.banlist),
+            "whitelist": list(self.whitelist)
+        }
