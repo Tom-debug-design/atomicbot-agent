@@ -1,125 +1,130 @@
 import random, time, os, requests
-from collections import deque, defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
-import numpy as np
 
-from learner import StrategyLearner
-
-# --- SETTINGS ---
+# SETTINGS
 TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT",
-    "MATICUSDT", "AVAXUSDT", "XRPUSDT", "TRXUSDT", "LINKUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT",
+    "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "XRPUSDT", "TRXUSDT", "LINKUSDT"
 ]
-STRATEGIES = ["RSI", "EMA", "MEAN", "SCALP", "TREND", "RANDOM"]
+STRATEGIES = ["RANDOM", "RSI", "EMA", "SCALP", "MEAN", "TREND"]
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
 
-# --- STOP LOSS SETTINGS ---
-PER_TRADE_STOP = 0.03     # 3 % per trade
-PER_STRATEGY_LOSS = 10    # $10 i tap på én time
-PER_STRATEGY_LOSS_TRADES = 5  # 5 tap på rad
-GLOBAL_STOP = 800
-GLOBAL_PAUSE_MINUTES = 30
+# EDGE/STOP-LOSS/REPORT
+LADDER_STEP = 200             # Øk ladder-stop hvert 200 USD
+LADDER_MARGIN = 0.8           # Stop-loss på 80% av ATH
+REPORT_HOUR_UTC = 7           # Daglig rapport kl. 07:00 UTC
+HOURLY_REPORT = True
 
-# --- EDGE LEARNER ---
-learner = StrategyLearner(base_window=20, min_window=10, max_window=30)
+# STATE
 BALANCE = START_BALANCE
+ATH_BALANCE = START_BALANCE
+LADDER_STOP = int(START_BALANCE * LADDER_MARGIN)
 trade_history = []
-last_report_time = datetime.utcnow().replace(second=0, microsecond=0)
-realized_pnl = 0.0
-
-# --- STRATEGI-STATISTIKK FOR PAUSE ---
-strategy_loss = defaultdict(float)
-strategy_loss_trades = defaultdict(int)
-strategy_paused_until = {}
-
-# --- GLOBAL PAUSE ---
-PAUSE_MODE = False
-pause_until = None
+strategy_stats = defaultdict(lambda: {"pnl": 0.0, "trades": 0, "wins": 0, "last_pnl": deque(maxlen=20)})
+last_edge = None
+strategy_switch_log = []
+last_daily_report = None
 
 def send_discord(msg):
-    if not DISCORD_WEBHOOK:
-        print("Discord webhook ikke satt!")
-        return
-    try:
-        requests.post(DISCORD_WEBHOOK, json={"content": msg})
-    except Exception as e:
-        print(f"Discord-feil: {e}")
-
-def handle_global_pause():
-    global PAUSE_MODE, pause_until
-    now = datetime.utcnow()
-    if BALANCE < GLOBAL_STOP:
-        if not PAUSE_MODE:
-            PAUSE_MODE = True
-            pause_until = now + timedelta(minutes=GLOBAL_PAUSE_MINUTES)
-            send_discord(f"🔴 GLOBAL STOP LOSS! Bot paused for {GLOBAL_PAUSE_MINUTES} min. Balance: ${BALANCE:.2f}")
+    if DISCORD_WEBHOOK:
+        try:
+            requests.post(DISCORD_WEBHOOK, json={"content": msg})
+        except Exception as e:
+            print("Discord error:", e)
     else:
-        if PAUSE_MODE and now >= pause_until:
-            PAUSE_MODE = False
-            send_discord(f"🟢 Bot resumed after global stop loss. Balance: ${BALANCE:.2f}")
+        print("Discord log:", msg)
 
-def handle_strategy_pause(strategy):
+def select_strategy():
+    # Velg beste strategi basert på PnL siste 20 trades (eller fallback RANDOM)
+    best, best_pnl = "RANDOM", -999
+    for strat, stats in strategy_stats.items():
+        if len(stats["last_pnl"]) >= 10:
+            avg = sum(stats["last_pnl"]) / len(stats["last_pnl"])
+            if avg > best_pnl:
+                best, best_pnl = strat, avg
+    return best
+
+def update_ladder_stop():
+    global ATH_BALANCE, LADDER_STOP
+    if BALANCE > ATH_BALANCE:
+        ATH_BALANCE = BALANCE
+        # Ladder flytter seg opp for hver ATH (med margin)
+        LADDER_STOP = int(ATH_BALANCE * LADDER_MARGIN)
+        send_discord(f"🔒 Ladder stop-loss flyttet til ${LADDER_STOP} (ATH: ${ATH_BALANCE})")
+
+def log_trade(strategy, pnl):
+    stats = strategy_stats[strategy]
+    stats["pnl"] += pnl
+    stats["trades"] += 1
+    if pnl > 0:
+        stats["wins"] += 1
+    stats["last_pnl"].append(pnl)
+
+def report_hourly():
+    msg = f"📊 [CHUNKY-EDGE] Hourly report: Trades: {len(trade_history)}, Bal: ${BALANCE:.2f}"
+    best_strat = select_strategy()
+    for strat in STRATEGIES:
+        s = strategy_stats[strat]
+        wr = 100 * s["wins"] / s["trades"] if s["trades"] > 0 else 0
+        avg = sum(s["last_pnl"]) / len(s["last_pnl"]) if s["last_pnl"] else 0
+        msg += f"\n- {strat}: PnL {s['pnl']:.2f}, WR {wr:.1f}%"
+    msg += f"\n🔥 Best: {best_strat}"
+    send_discord(msg)
+
+def report_daily():
+    global last_daily_report
     now = datetime.utcnow()
-    if (strategy_loss[strategy] <= -PER_STRATEGY_LOSS or
-        strategy_loss_trades[strategy] >= PER_STRATEGY_LOSS_TRADES):
-        strategy_paused_until[strategy] = now + timedelta(hours=1)
-        send_discord(f"⏸️ Strategy {strategy} paused for 1 hour (too many losses)")
-        # Reset counters
-        strategy_loss[strategy] = 0
-        strategy_loss_trades[strategy] = 0
-
-def is_strategy_paused(strategy):
-    now = datetime.utcnow()
-    until = strategy_paused_until.get(strategy)
-    return until is not None and now < until
-
-def trade(token, strategy):
-    global BALANCE, realized_pnl
-
-    if PAUSE_MODE or is_strategy_paused(strategy):
-        return
-
-    # Dummy trade logic, replace with real trading code!
-    entry_price = random.uniform(0.95, 1.05)
-    direction = random.choice([-1, 1])
-    size = random.uniform(20, 50)
-    exit_price = entry_price + direction * entry_price * random.uniform(0.001, 0.04)
-    pnl = (exit_price - entry_price) * size
-    BALANCE += pnl
-    realized_pnl += pnl
-    trade_history.append((datetime.utcnow(), token, strategy, pnl, size, entry_price, exit_price))
-
-    # --- Per-trade stop loss ---
-    if pnl < -PER_TRADE_STOP * size * entry_price:
-        send_discord(f"🛑 STOP LOSS: Trade on {token} {strategy} closed at {pnl:.2f}$ (auto-exit)")
-        # Optionally close/mark trade here
-
-    # --- Per-strategy ---
-    if pnl < 0:
-        strategy_loss[strategy] += pnl
-        strategy_loss_trades[strategy] += 1
-        handle_strategy_pause(strategy)
-    else:
-        strategy_loss_trades[strategy] = 0
+    if last_daily_report and now.date() == last_daily_report.date():
+        return  # Allerede rapportert i dag
+    if now.hour == REPORT_HOUR_UTC:
+        msg = f"📅 [CHUNKY-EDGE] Daily report ({now.strftime('%Y-%m-%d')}): Trades: {len(trade_history)}, Bal: ${BALANCE:.2f}"
+        for strat in STRATEGIES:
+            s = strategy_stats[strat]
+            wr = 100 * s["wins"] / s["trades"] if s["trades"] > 0 else 0
+            msg += f"\n- {strat}: PnL {s['pnl']:.2f}, WR {wr:.1f}%"
+        send_discord(msg)
+        last_daily_report = now
 
 def main_loop():
-    global BALANCE
+    global BALANCE, last_edge
+    report_timer = time.time()
     while True:
-        handle_global_pause()
-
-        if PAUSE_MODE:
-            time.sleep(10)
+        # Check ladder stop
+        update_ladder_stop()
+        if BALANCE < LADDER_STOP:
+            send_discord(f"🛑 STOP-LOSS: Balance under ${LADDER_STOP}! Boten PAUSE 30 min. (Bal: ${BALANCE:.2f})")
+            time.sleep(1800)  # 30 min pause
             continue
 
+        # Strategi-valg med smartere edge-bytte
+        best_strategy = select_strategy()
+        if best_strategy != last_edge:
+            strategy_switch_log.append((datetime.utcnow(), last_edge, best_strategy, BALANCE))
+            send_discord(f"🔁 Bytter edge: {last_edge} → {best_strategy} (Bal: ${BALANCE:.2f})")
+            last_edge = best_strategy
+
+        # Dummy trade – bytt ut med ekte signaler/kode
         token = random.choice(TOKENS)
-        strategy = random.choice(STRATEGIES)
-        if is_strategy_paused(strategy):
-            continue
-        trade(token, strategy)
+        size = random.uniform(20, 50)
+        entry = random.uniform(0.95, 1.05)
+        # Simuler PnL
+        direction = 1 if random.random() < 0.5 else -1
+        exitp = entry + direction * entry * random.uniform(0.001, 0.04)
+        pnl = (exitp - entry) * size
 
-        # Rapporter hver time eller hva du ønsker
+        BALANCE += pnl
+        trade_history.append((datetime.utcnow(), token, best_strategy, pnl, size, entry, exitp))
+        log_trade(best_strategy, pnl)
+
+        # Hourly/daily rapporter
+        if HOURLY_REPORT and (time.time() - report_timer > 3600):
+            report_hourly()
+            report_timer = time.time()
+        report_daily()
         time.sleep(1)
 
 if __name__ == "__main__":
+    send_discord("🟢 Chunky Edge Bot starter!")
     main_loop()
