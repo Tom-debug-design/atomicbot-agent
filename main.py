@@ -2,14 +2,12 @@ import random, time, os, requests
 from collections import deque
 from datetime import datetime, timedelta
 import numpy as np
-
 from learner import StrategyLearner
 
 # --- SETTINGS ---
 TOKENS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
-    "ADAUSDT", "DOGEUSDT", "MATICUSDT", "AVAXUSDT",
-    "XRPUSDT", "TRXUSDT", "LINKUSDT"
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "DOGEUSDT",
+    "MATICUSDT", "AVAXUSDT", "XRPUSDT", "TRXUSDT", "LINKUSDT"
 ]
 STRATEGIES = ["RSI", "EMA", "MEAN", "SCALP", "TREND", "RANDOM"]
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
@@ -22,8 +20,11 @@ trade_history = []
 last_report_time = datetime.utcnow().replace(second=0, microsecond=0)
 realized_pnl = 0.0
 
-# --- SLIDING LOSS WINDOW ---
-recent_pnls = deque(maxlen=5)  # Holder de siste 5 PnL for tap-sjekk
+# --- STRATEGY TRACKERS ---
+recent_pnls = deque(maxlen=4)
+strategy_wr = {s: deque(maxlen=10) for s in STRATEGIES}
+banned_strategies = set()
+current_strategy = "MEAN"
 
 def send_discord(msg):
     if not DISCORD_WEBHOOK:
@@ -35,55 +36,86 @@ def send_discord(msg):
         print(f"Discord-feil: {e}")
 
 def switch_strategy():
-    # Dummy-funksjon, bytt til en ny tilfeldig strategi
     global current_strategy
-    available = [s for s in STRATEGIES if s != current_strategy]
-    current_strategy = random.choice(available)
-    send_discord(f"🟡 [CHUNKY-EDGE] Switched strategy to: {current_strategy}")
+    available = [s for s in STRATEGIES if s not in banned_strategies]
+    # Velg tilfeldig blant de gjenværende, ikke den samme
+    new_strat = random.choice([s for s in available if s != current_strategy])
+    send_discord(f"🔄 Bytter strategi fra {current_strategy} til {new_strat}!")
+    current_strategy = new_strat
 
-# --- START MED EN TILFELDIG STRATEGI ---
-current_strategy = random.choice(STRATEGIES)
+def best_strategy():
+    # Finn strategi med best WR siste 10 trades
+    wrs = {s: sum(strategy_wr[s])/len(strategy_wr[s]) if strategy_wr[s] else 0 for s in STRATEGIES}
+    return max(wrs, key=wrs.get)
 
 def simulate_trade():
-    global BALANCE, realized_pnl
-
-    # Dummy trading-logic (bytt ut med ekte signaler)
+    global BALANCE, realized_pnl, current_strategy
+    # --- Dummy trade ---
     token = random.choice(TOKENS)
-    price = random.uniform(0.95, 1.05) * 100
-    amount = random.uniform(1, 10)
+    price = random.uniform(0.95, 1.05) * 20  # Fake price
+    qty = random.uniform(0.9, 1.1) * 1
     direction = random.choice(["BUY", "SELL"])
-    pnl = round(random.uniform(-5, 5), 2)  # Simulert PnL
-
-    # Logg trade til learner og history
-    learner.log_trade(current_strategy, token, pnl, price)
-    trade_history.append((datetime.utcnow(), direction, token, price, amount, current_strategy, pnl))
-    realized_pnl += pnl
+    # --- Lag PnL: Gi random, men la vinn/tap-oddsen avhenge litt av strategi
+    strat_bonus = {"RSI": 0.52, "EMA": 0.48, "MEAN": 0.55, "SCALP": 0.51, "TREND": 0.49, "RANDOM": 0.35}
+    win = random.random() < strat_bonus.get(current_strategy, 0.5)
+    pnl = round(random.uniform(0.2, 2.5) * (1 if win else -1), 2)
     BALANCE += pnl
-
-    # --- SLIDING WINDOW CHECK ---
+    realized_pnl += pnl
+    trade_history.append({
+        "time": datetime.utcnow().isoformat(),
+        "strategy": current_strategy,
+        "token": token,
+        "qty": qty,
+        "price": price,
+        "direction": direction,
+        "pnl": pnl,
+        "bal": BALANCE
+    })
+    # Oppdater winrate-tracker
+    strategy_wr[current_strategy].append(pnl > 0)
+    # Glidende tap
     recent_pnls.append(pnl)
-    if len(recent_pnls) == 5:
-        num_losses = sum(1 for x in recent_pnls if x < 0)
-        if num_losses >= 4:
+    losses = sum(1 for x in recent_pnls if x < 0)
+    wins = sum(1 for x in recent_pnls if x > 0)
+
+    # --- Hot streak: Bli på strategi hvis 3+ pluss på rad
+    if wins >= 3 and len(recent_pnls) == 4:
+        pass
+    # --- Bytt strategi ved 3 av 4 tap
+    elif losses >= 3 and len(recent_pnls) == 4:
+        send_discord(f"⚠️ {losses} tap på rad – bytter strategi!")
+        switch_strategy()
+        recent_pnls.clear()
+    # --- Ban RANDOM hvis WR < 25% siste 10 trades
+    if current_strategy == "RANDOM":
+        wr = sum(strategy_wr["RANDOM"]) / len(strategy_wr["RANDOM"]) if len(strategy_wr["RANDOM"]) else 0
+        if len(strategy_wr["RANDOM"]) == 10 and wr < 0.25:
+            send_discord("🚫 RANDOM banet for lav winrate!")
+            banned_strategies.add("RANDOM")
             switch_strategy()
-            print("🟡 [CHUNKY-EDGE] Bytter strategi etter 4 av 5 tap!")
-            recent_pnls.clear()
+    # --- Emergency: 4 tap på rad, gå til best strategi
+    if len(recent_pnls) == 4 and losses == 4:
+        best = best_strategy()
+        send_discord(f"🆘 Nødsituasjon: bytter til best WR strategi: {best}")
+        current_strategy = best
+        recent_pnls.clear()
 
-    # --- EVENTUELT STOP LOSS, ETC ---
-    if BALANCE < 800:
-        send_discord(f"🔴 Stop-loss triggered! Balance: ${BALANCE:.2f}. Pauser trading.")
-        print("🔴 Stop-loss utløst!")
-        time.sleep(60)  # Pause for demo (fjern eller erstatt i prod)
+def hourly_report():
+    # Lag timesrapport
+    wrs = {s: sum(strategy_wr[s])/len(strategy_wr[s]) if strategy_wr[s] else 0 for s in STRATEGIES}
+    pnls = {s: sum(x["pnl"] for x in trade_history if x["strategy"] == s) for s in STRATEGIES}
+    msg = (
+        f"📊 [CHUNKY-EDGE] Hourly report: Trades: {len(trade_history)}, Bal: ${BALANCE:.2f}, Realized PnL: {realized_pnl:.2f}\n" +
+        "".join([f"- {s}: PnL {pnls[s]:.2f}, WR {wrs[s]*100:.1f}%\n" for s in STRATEGIES]) +
+        f"🔥 Best: {best_strategy()}"
+    )
+    send_discord(msg)
 
-    # --- Discord-rapport (enkel demo) ---
-    if random.random() < 0.05:
-        send_discord(f"[STD] {direction} {token}: {amount:.4f} @ ${price:.2f}, strategy: {current_strategy}, bal: ${BALANCE:.2f}")
-
-def main_loop():
-    while True:
-        simulate_trade()
-        time.sleep(1)  # Justér for ønsket hastighet
-
-if __name__ == "__main__":
-    print("🚀 ChunkyBot starter...")
-    main_loop()
+# --- MAIN LOOP ---
+next_report = datetime.utcnow() + timedelta(hours=1)
+while True:
+    simulate_trade()
+    time.sleep(1)  # Juster for test/demo
+    if datetime.utcnow() >= next_report:
+        hourly_report()
+        next_report += timedelta(hours=1)
