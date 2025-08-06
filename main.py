@@ -1,5 +1,7 @@
-import random, time, os, requests
+import os, random, time, requests, json
+from datetime import datetime, timedelta
 
+# ---- SETTINGS ----
 TOKENS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
     "DOGEUSDT", "MATICUSDT", "AVAXUSDT", "LINKUSDT"
@@ -12,111 +14,114 @@ COINGECKO_MAP = {
 }
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 START_BALANCE = 1000.0
-LIVE_DEMO = True
+TRADE_PCT = 0.1
+MIN_TRADE_PCT = 0.05
+MAX_TRADE_PCT = 0.35
+STRATEGIES = ["RANDOM", "RSI", "EMA", "SCALP", "MEAN", "TREND"]
 
-# --- STATE ---
+# ------------- STOP-LOSS ----------------
+GLOBAL_STOP = 350     # Stopp boten hvis balanse < dette (demo/test)
+STOP_LOSS_PER_TRADE = -2.0  # Maks tap pr trade i %
+
+# ----------- DYNAMIC EDGE ----------------
+EDGE_CONFIRM = 3      # Hvor mange strategier må være enige for å handle
+SWITCH_AFTER_LOSSES = 3  # Skift strategi etter X tap på rad
+
+# ----------- AI/ML (random forest placeholder) --------
+USE_ML = True
+
+# ---- STATE ----
 balance = START_BALANCE
-holdings = {symbol: 0.0 for symbol in TOKENS}
+holdings = {s: 0.0 for s in TOKENS}
 trade_log = []
-auto_buy_pct = 0.1
-paused_strategies = set()
-last_loss = {}
+current_strategy = "RANDOM"
+loss_streak = 0
+trade_pct = TRADE_PCT
+
+last_hourly = time.time()
+last_daily = datetime.utcnow().date()
+hourly_trade_count = 0
+best_strat = "RANDOM"
 
 def send_discord(msg):
     print("DISCORD:", msg)
     try:
         requests.post(DISCORD_WEBHOOK, json={"content": msg})
     except Exception as e:
-        print(f"Discord error: {e}")
+        print("Discord error:", e)
 
-def get_live_price(symbol):
+def get_price(symbol):
     coingecko_id = COINGECKO_MAP.get(symbol, "bitcoin")
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={coingecko_id}&vs_currencies=usd"
     try:
         data = requests.get(url, timeout=5).json()
         return float(data[coingecko_id]["usd"])
     except Exception as e:
-        print(f"Live price error: {e}")
+        print("Price fetch error:", e)
         return None
 
-def get_dummy_price(symbol):
-    return random.uniform(10, 100)
-
-def all_strategies():
-    return ["RSI", "EMA", "RANDOM", "SCALP", "MEAN", "TREND"]
-
-def choose_strategy(active_strategies):
-    # Plukk tilfeldig av aktive, hvis tom: fallback til RANDOM
-    if not active_strategies:
-        return "RANDOM"
-    return random.choice(active_strategies)
-
-def get_signal(strategy, price, holdings):
+def rsi_signal(price, holdings):
+    # Dummy RSI logic, can upgrade
     if price is None: return "HOLD"
-    if strategy == "RSI":
-        if price < 25 and holdings == 0:
-            return "BUY"
-        elif price > 60 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
-    elif strategy == "EMA":
-        if int(price) % 2 == 0 and holdings == 0:
-            return "BUY"
-        elif int(price) % 5 == 0 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
-    elif strategy == "SCALP":
-        # Kjapp trade – kjøp hvis pris slutter på 3 eller 7, selg hvis 8 eller 9
-        if int(price) % 10 in (3, 7) and holdings == 0:
-            return "BUY"
-        elif int(price) % 10 in (8, 9) and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
-    elif strategy == "MEAN":
-        # Mean reversion (late som): Kjøp hvis pris er under 40, selg hvis over 70
-        if price < 40 and holdings == 0:
-            return "BUY"
-        elif price > 70 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
-    elif strategy == "TREND":
-        # Trend: kjøp hvis pris er stigende siste 3 ticks
-        if price > 50 and holdings == 0:
-            return "BUY"
-        elif price < 50 and holdings > 0:
-            return "SELL"
-        else:
-            return "HOLD"
-    else:
-        return random.choice(["BUY", "SELL", "HOLD"])
+    if price < 25 and holdings == 0: return "BUY"
+    if price > 60 and holdings > 0: return "SELL"
+    return "HOLD"
 
-def get_best_strategies(trade_log, min_pnl=0):
-    recent = [t for t in trade_log[-20:] if t["action"] == "SELL"]
-    strat_stats = {}
-    for t in recent:
-        s = t.get("strategy", "RANDOM")
-        strat_stats.setdefault(s, []).append(t.get("pnl", 0))
-    winners = []
-    for s, pnl_list in strat_stats.items():
-        if sum(pnl_list)/len(pnl_list) > min_pnl:
-            winners.append(s)
-    return winners if winners else ["RANDOM"]
+def ema_signal(price, holdings):
+    if price is None: return "HOLD"
+    if int(price) % 2 == 0 and holdings == 0: return "BUY"
+    if int(price) % 5 == 0 and holdings > 0: return "SELL"
+    return "HOLD"
+
+def scalp_signal(price, holdings):
+    # Scalping: buy any random dip
+    if price is None: return "HOLD"
+    if random.random() < 0.12 and holdings == 0: return "BUY"
+    if random.random() < 0.09 and holdings > 0: return "SELL"
+    return "HOLD"
+
+def mean_signal(price, holdings):
+    if price is None: return "HOLD"
+    avg = 45
+    if price < avg - 4 and holdings == 0: return "BUY"
+    if price > avg + 4 and holdings > 0: return "SELL"
+    return "HOLD"
+
+def trend_signal(price, holdings):
+    if price is None: return "HOLD"
+    if random.random() < 0.1 and holdings == 0: return "BUY"
+    if random.random() < 0.07 and holdings > 0: return "SELL"
+    return "HOLD"
+
+def random_signal(price, holdings):
+    return random.choice(["BUY", "SELL", "HOLD"])
+
+SIGNAL_FUNCS = {
+    "RANDOM": random_signal,
+    "RSI": rsi_signal,
+    "EMA": ema_signal,
+    "SCALP": scalp_signal,
+    "MEAN": mean_signal,
+    "TREND": trend_signal
+}
+
+def get_signals(price, holdings):
+    signals = {}
+    for strat in STRATEGIES:
+        signals[strat] = SIGNAL_FUNCS[strat](price, holdings)
+    return signals
 
 def handle_trade(symbol, action, price, strategy):
-    global balance, holdings, trade_log, auto_buy_pct, last_loss
+    global balance, holdings, trade_log, trade_pct, loss_streak
     if price is None: return
-    amount_usd = balance * auto_buy_pct if action == "BUY" else holdings[symbol] * price
-    qty = round(amount_usd / price, 6) if action == "BUY" else holdings[symbol]
+    qty = round((balance * trade_pct) / price, 6) if action == "BUY" else holdings[symbol]
     pnl = 0.0
 
-    if action == "BUY" and balance >= amount_usd and qty > 0:
-        balance -= amount_usd
+    if action == "BUY" and balance >= qty * price and qty > 0:
+        balance -= qty * price
         holdings[symbol] += qty
-        send_discord(f"🔵 BUY {symbol}: {qty} at ${price:.2f}, new balance ${balance:.2f} [{strategy}] [{('LIVE DEMO' if LIVE_DEMO else 'DUMMY')}]")
+        msg = f"🔵 [CHUNKY-{strategy}] BUY {symbol}: {qty} @ ${price:.2f}, Bal: ${balance:.2f}"
+        send_discord(msg)
         trade_log.append({
             "symbol": symbol, "action": "BUY", "price": price,
             "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": 0.0
@@ -127,87 +132,104 @@ def handle_trade(symbol, action, price, strategy):
         pnl = ((price - last_buy["price"]) / last_buy["price"] * 100) if last_buy else 0.0
         balance += proceeds
         holdings[symbol] = 0.0
-        send_discord(f"🔴 SELL {symbol}: {qty} at ${price:.2f}, PnL: {pnl:.2f}%, balance: ${balance:.2f} [{strategy}] [{('LIVE DEMO' if LIVE_DEMO else 'DUMMY')}]")
+        color = "🟢" if pnl > 0 else "🔴"
+        msg = f"🔴 [CHUNKY-{strategy}] SELL {symbol}: {qty} @ ${price:.2f}, PnL: {color} {pnl:.2f}%, Bal: ${balance:.2f}"
+        send_discord(msg)
         trade_log.append({
             "symbol": symbol, "action": "SELL", "price": price,
             "qty": qty, "timestamp": time.time(), "strategy": strategy, "pnl": pnl
         })
-        # Track tap for strategi
-        if pnl < 0:
-            last_loss.setdefault(strategy, []).append(1)
+        # STOP LOSS trigger
+        if pnl < STOP_LOSS_PER_TRADE:
+            send_discord(f"🚨 [CHUNKY] STOP-LOSS hit! {symbol} PnL: {pnl:.2f}%")
+            loss_streak += 1
+        elif pnl < 0:
+            loss_streak += 1
         else:
-            last_loss.setdefault(strategy, []).append(0)
-        # Slett eldre enn 3
-        if len(last_loss[strategy]) > 3:
-            last_loss[strategy] = last_loss[strategy][-3:]
+            loss_streak = 0
+
+def dynamic_edge_score(signals):
+    votes = {"BUY": 0, "SELL": 0}
+    for strat, signal in signals.items():
+        if signal == "BUY": votes["BUY"] += 1
+        if signal == "SELL": votes["SELL"] += 1
+    if votes["BUY"] >= EDGE_CONFIRM: return "BUY"
+    if votes["SELL"] >= EDGE_CONFIRM: return "SELL"
+    return "HOLD"
+
+def best_strategy_report():
+    strat_stats = {}
+    for strat in STRATEGIES:
+        sells = [t for t in trade_log if t["action"] == "SELL" and t["strategy"] == strat]
+        pnl = sum(t["pnl"] for t in sells)
+        wr = (sum(1 for t in sells if t["pnl"] > 0) / len(sells)) * 100 if sells else 0
+        strat_stats[strat] = {"pnl": pnl, "wr": wr}
+    best = max(strat_stats, key=lambda s: strat_stats[s]["pnl"])
+    return strat_stats, best
 
 def hourly_report():
-    total_trades = len(trade_log)
+    strat_stats, best = best_strategy_report()
     realized_pnl = sum(t.get("pnl", 0) for t in trade_log if t["action"] == "SELL")
-    strat_pnls = {}
-    strat_wins = {}
-    for s in all_strategies():
-        sells = [t for t in trade_log if t.get("strategy")==s and t["action"]=="SELL"]
-        pnl = sum(t["pnl"] for t in sells)
-        wins = [t for t in sells if t["pnl"]>0]
-        wr = 100*len(wins)/len(sells) if sells else 0
-        strat_pnls[s] = pnl
-        strat_wins[s] = wr
-    msg = f"📊 [CHUNKY-EDGE] Hourly report: Trades: {total_trades}, Bal: ${balance:.2f}, Realized PnL: {realized_pnl:.2f}\n"
-    for s in all_strategies():
-        msg += f"- {s}: PnL {strat_pnls[s]:.2f}, WR {strat_wins[s]:.1f}%\n"
-    best = max(strat_pnls, key=lambda s: strat_pnls[s])
-    msg += f"🔥 Best: {best}"
+    total_trades = len(trade_log)
+    msg = f"📊 [CHUNKY-EDGE] Hourly report: Trades: {total_trades}, Bal: ${balance:.2f}, Realized PnL: {realized_pnl:.2f}"
+    for strat, d in strat_stats.items():
+        msg += f"\n- {strat}: PnL {d['pnl']:.2f}, WR {d['wr']:.1f}%"
+    msg += f"\n🔥 Best: {best}"
     send_discord(msg)
 
 def daily_report():
-    total_trades = len(trade_log)
+    strat_stats, best = best_strategy_report()
     realized_pnl = sum(t.get("pnl", 0) for t in trade_log if t["action"] == "SELL")
-    msg = f"📅 [CHUNKY-EDGE] DAILY report: Trades: {total_trades}, Bal: ${balance:.2f}, Realized PnL: {realized_pnl:.2f} [{('LIVE DEMO' if LIVE_DEMO else 'DUMMY')}]"
+    total_trades = len(trade_log)
+    msg = f"📅 [CHUNKY-EDGE] Daily report: Trades: {total_trades}, Bal: ${balance:.2f}, Realized PnL: {realized_pnl:.2f}"
+    for strat, d in strat_stats.items():
+        msg += f"\n- {strat}: PnL {d['pnl']:.2f}, WR {d['wr']:.1f}%"
+    msg += f"\n🔥 Best: {best}"
     send_discord(msg)
 
-send_discord(f"🟢 AtomicBot starter… ({'LIVE DEMO' if LIVE_DEMO else 'DUMMY'} mode!)")
+def ai_learn(trades):
+    # Placeholder for ML/RandomForest training
+    # Kan bygges ut til å bruke trade-log som feature set
+    if USE_ML:
+        # Simulert "learning"
+        if len(trades) > 1000:
+            send_discord("🧠 [CHUNKY-EDGE] ML-model oppdatert på trades!")
 
-last_report = time.time()
-last_hour = time.gmtime().tm_hour
-daily_sent = False
-pause_until = {}
+def stop_bot():
+    send_discord("⛔️ [CHUNKY-EDGE] Bot stopped! (Global stop-loss)")
+    exit()
+
+send_discord("🟢 [CHUNKY-EDGE] AtomicBot starter…")
+
+# --------------- MAIN LOOP ----------------
 
 while True:
-    # Emergency mode hvis under 60 % av startbalanse
-    if balance < START_BALANCE * 0.6:
-        active_strategies = ["RSI", "RANDOM"]
-        send_discord("⚠️ EMERGENCY MODE: Bruker kun RSI & RANDOM (balanse lav!)")
-    else:
-        # Pause tapere i 1 time hvis 3 tap på rad
-        now = time.time()
-        for s, losses in last_loss.items():
-            if sum(losses)==3 and (pause_until.get(s,0) < now):
-                paused_strategies.add(s)
-                pause_until[s] = now + 3600  # 1 time pause
-                send_discord(f"⏸️ Setter strategi {s} på pause i 1 time (3 tap på rad)")
-            if pause_until.get(s,0) < now and s in paused_strategies:
-                paused_strategies.remove(s)
-        # Velg vinnere
-        active_strategies = [s for s in get_best_strategies(trade_log) if s not in paused_strategies]
-        if not active_strategies:
-            active_strategies = ["RANDOM"]
+    if balance < GLOBAL_STOP:
+        stop_bot()
+
     for symbol in TOKENS:
-        price = get_live_price(symbol) if LIVE_DEMO else get_dummy_price(symbol)
-        strategy = choose_strategy(active_strategies)
-        action = get_signal(strategy, price, holdings[symbol])
-        print(f"{symbol} | Pris: {price} | Strategy: {strategy} | Signal: {action}")
+        price = get_price(symbol)
+        signals = get_signals(price, holdings[symbol])
+        action = dynamic_edge_score(signals)
+
+        # Optional: override for testing
+        # action = random.choice(["BUY", "SELL", "HOLD"])
+
         if action in ("BUY", "SELL"):
-            handle_trade(symbol, action, price, strategy)
-
-    now = time.gmtime()
-    if now.tm_min == 0 and now.tm_sec < 30 and last_hour != now.tm_hour:
+            handle_trade(symbol, action, price, current_strategy)
+    # Switch strategy after X losses
+    if loss_streak >= SWITCH_AFTER_LOSSES:
+        old_strat = current_strategy
+        current_strategy = random.choice([s for s in STRATEGIES if s != old_strat])
+        send_discord(f"🔁 [CHUNKY] Switch strat after losses! {old_strat} ➡️ {current_strategy}")
+        loss_streak = 0
+    # Hourly/daily report
+    now = datetime.utcnow()
+    if time.time() - last_hourly > 3600:
         hourly_report()
-        last_hour = now.tm_hour
-    if now.tm_hour == 7 and now.tm_min == 0 and now.tm_sec < 30 and not daily_sent:
+        ai_learn(trade_log)
+        last_hourly = time.time()
+    if now.date() != last_daily and now.hour >= 7:
         daily_report()
-        daily_sent = True
-    elif now.tm_hour != 7:
-        daily_sent = False
-
-    time.sleep(5)
+        last_daily = now.date()
+    time.sleep(15)
