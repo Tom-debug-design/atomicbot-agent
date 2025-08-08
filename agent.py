@@ -193,5 +193,15 @@ def main_loop():
             last_daily = now_dt.date()
         time.sleep(10)
 
+# ... alt innholdet i agent.py over denne blokken ...
+
 if __name__ == "__main__":
+    # 🚀 Kall GitHub-broen én gang ved oppstart.
+    import bridge
+    bridge.commit_file(
+        "bridge_test_live.txt",
+        f"Bridge is alive - {datetime.datetime.utcnow().isoformat()}Z"
+    )
+
+    # Start trading-loopen
     main_loop()
