@@ -20,7 +20,8 @@ from zoneinfo import ZoneInfo
 
 import requests
 from flask import Flask, jsonify
-
+import bridge
+bridge.commit_file("bridge_test.txt", f"Bridge is alive - {__name__}")
 VERSION = "AtomicBot v6"
 DEFAULT_TOKENS = ["BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "AVAX", "MATIC"]
 BINANCE_BASE = "https://api.binance.com/api/v3"
