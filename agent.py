@@ -196,17 +196,21 @@ def main_loop():
 # ... alt innholdet i agent.py over denne blokken ...
 
 if __name__ == "__main__":
-    # 🚀 Test GitHub-bro ved oppstart – rapporter status til Discord
+    # 🚀 GitHub-bridge test ved oppstart (med env-sjekk og Discord-varsel)
     try:
-        import bridge
-        stamp = datetime.datetime.utcnow().isoformat() + "Z"
-        ok = bridge.commit_file("bridge_test_live.txt", f"Bridge is alive - {stamp}")
-        if ok:
-            send_discord(f"✅ [BRIDGE] Pushet bridge_test_live.txt {stamp}")
+        import os, datetime, bridge
+
+        missing = [k for k in ("GITHUB_TOKEN", "GITHUB_REPO") if not os.getenv(k)]
+        if missing:
+            send_discord(f"❌ [BRIDGE] Mangler env vars: {', '.join(missing)}")
         else:
-            send_discord("❌ [BRIDGE] commit_file returnerte False (sjekk GITHUB_* env vars).")
+            stamp = datetime.datetime.utcnow().isoformat() + "Z"
+            ok = bridge.commit_file("bridge_test_live.txt", f"Bridge is alive - {stamp}")
+            if ok:
+                send_discord(f"✅ [BRIDGE] bridge_test_live.txt pushet {stamp}")
+            else:
+                send_discord("❌ [BRIDGE] commit_file() returnerte False (sjekk token/scope/branch).")
     except Exception as e:
-        # Fanger alt og viser det i Discord siden Railway-logger ikke vises
         send_discord(f"🔥 [BRIDGE ERROR] {type(e).__name__}: {e}")
 
     # Start trading-loopen
